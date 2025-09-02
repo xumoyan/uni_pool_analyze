@@ -242,12 +242,33 @@ export default function PoolDetailPage() {
 
     return formattedPrice
   })
-  const chartData = chartPageData.map((item) => Number(item.liquidityGross))
+
+  const chartData = chartPageData.map((item) => {
+    let token0Val = item.token0AmountFormatted
+    let token1Val = item.token1AmountFormatted
+    let token0Num =
+      typeof token0Val === "string" ? parseFloat(token0Val) : token0Val
+    let token1Num =
+      typeof token1Val === "string" ? parseFloat(token1Val) : token1Val
+    let price = Number(item.price)
+
+    if (token1Num && token0Num) {
+      return token1Num + token0Num * price
+    }
+
+    if (!token1Num) {
+      return isNaN(token0Num) || isNaN(price) || price === 0
+        ? 0
+        : token0Num * price
+    }
+    return isNaN(token1Num) ? 0 : token1Num
+  })
+
   const distributionChartData = {
     labels: chartLabels,
     datasets: [
       {
-        label: "流动性分布",
+        label: `Token1数量 (${pool?.token1Symbol})`,
         data: chartData,
         backgroundColor: "rgba(59, 130, 246, 0.5)",
         borderColor: "rgba(59, 130, 246, 1)",
@@ -477,7 +498,7 @@ export default function PoolDetailPage() {
                     },
                     title: {
                       display: true,
-                      text: `流动性分布图 (每页${chartPageSize}条)`,
+                      text: `Token1数量分布图 (每页${chartPageSize}条)`,
                     },
                     tooltip: {
                       callbacks: {
@@ -487,8 +508,6 @@ export default function PoolDetailPage() {
                           return [
                             `价格: ${getDisplayPrice(item.price)}`,
                             `Tick: ${item.tick}`,
-                            `LiquidityGross: ${item.liquidityGross}`,
-                            `LiquidityNet: ${item.liquidityNet}`,
                             `Token0数量: ${item.token0AmountFormatted} ${pool.token0Symbol}`,
                             `Token1数量: ${item.token1AmountFormatted} ${pool.token1Symbol}`,
                             `Block: ${item.blockNumber}`,
@@ -509,7 +528,7 @@ export default function PoolDetailPage() {
                       beginAtZero: true,
                       title: {
                         display: true,
-                        text: "流动性 (liquidityGross)",
+                        text: `Token1数量 (${pool?.token1Symbol})`,
                       },
                     },
                   },
