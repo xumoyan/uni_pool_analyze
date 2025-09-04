@@ -29,7 +29,7 @@ import appConfig from "./config/configuration";
         ssl:
           process.env.DB_SSL === "true" ? { rejectUnauthorized: false } : false,
         entities: [Pool, TickLiquidity],
-        synchronize: true, // 开发环境使用，生产环境应该关闭
+        synchronize: false, // 开发环境使用，生产环境应该关闭
         logging: true,
       }),
     }),
@@ -39,4 +39,4 @@ import appConfig from "./config/configuration";
   controllers: [PoolController, LiquidityController],
   providers: [PoolManagerService, LiquidityCollectorService],
 })
-export class AppModule {}
+export class AppModule { }

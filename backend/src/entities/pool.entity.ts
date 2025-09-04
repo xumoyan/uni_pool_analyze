@@ -66,4 +66,7 @@ export class Pool {
 
   @OneToMany(() => TickLiquidity, (tickLiquidity) => tickLiquidity.pool)
   tickLiquidities: TickLiquidity[];
+
+  @Column()
+  chainId: number;
 }

@@ -8,6 +8,6 @@ export default registerAs("database", () => ({
   password: process.env.DB_PASSWORD || "123456",
   database: process.env.DB_NAME || "uniswap_v3_analyzer",
   ssl: process.env.DB_SSL === "true" ? { rejectUnauthorized: false } : false,
-  synchronize: true, // 开发环境使用，生产环境应该关闭
+  synchronize: false, // 开发环境使用，生产环境应该关闭
   logging: true,
 }));

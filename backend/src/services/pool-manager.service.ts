@@ -77,6 +77,7 @@ export class PoolManagerService {
         currentSqrtPriceX96: poolInfo.currentSqrtPriceX96,
         totalLiquidity: poolInfo.totalLiquidity,
         isActive: true,
+        chainId: this.configService.get<number>("ethereum.chainId"),
       });
 
       const savedPool = await this.poolRepository.save(pool);

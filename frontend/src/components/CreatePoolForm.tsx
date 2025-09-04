@@ -126,6 +126,7 @@ export default function CreatePoolForm({
                 className="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 required
               >
+                <option value={100}>0.01% (100)</option>
                 <option value={500}>0.05% (500)</option>
                 <option value={3000}>0.3% (3000)</option>
                 <option value={10000}>1% (10000)</option>
