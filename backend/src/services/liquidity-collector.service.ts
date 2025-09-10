@@ -67,10 +67,7 @@ export class LiquidityCollectorService {
       // 更新池子信息
       await this.updatePoolInfo(pool, poolInfo);
 
-      // 使用新的流动性计算器计算总代币数量
-      await this.calculateAndUpdateTotalAmounts(pool, poolInfo);
-
-      // 扫描并存储tick数据
+      // 扫描并存储tick数据，同时计算总代币数量
       await this.scanAndStoreTicks(pool, poolInfo);
 
       this.logger.log(`池子 ${pool.address} 数据收集完成`);
@@ -90,50 +87,9 @@ export class LiquidityCollectorService {
     await this.poolRepository.save(pool);
   }
 
-  /**
-   * 使用新的流动性计算器计算总代币数量
-   */
-  private async calculateAndUpdateTotalAmounts(pool: Pool, poolInfo: any) {
-    try {
-      // 创建池子合约实例
-      const poolContract = new ethers.Contract(
-        pool.address,
-        [
-          "function slot0() external view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, uint8 feeProtocol, bool unlocked)",
-          "function liquidity() external view returns (uint128)",
-          "function tickSpacing() external view returns (int24)",
-          "function ticks(int24 tick) external view returns (uint128 liquidityGross, int128 liquidityNet, uint256 feeGrowthOutside0X128, uint256 feeGrowthOutside1X128, int56 tickCumulativeOutside, uint160 secondsPerLiquidityOutsideX128, uint32 secondsOutside, bool initialized)",
-        ],
-        new ethers.providers.JsonRpcProvider(
-          this.configService.get<string>("ethereum.rpcUrl"),
-        ),
-      );
-
-      // 使用新的计算器计算总代币数量
-      const result = await this.liquidityCalculator.calculateTotalTokenAmounts(
-        poolContract as any,
-        pool.token0Decimals,
-        pool.token1Decimals,
-        887272, // 扫描全区间（Uniswap V3 最大 tick 范围）
-      );
-
-      // 更新池子的总代币数量
-      pool.totalAmount0 = result.amount0.toString();
-      pool.totalAmount1 = result.amount1.toString();
-
-      await this.poolRepository.save(pool);
-
-      this.logger.log(`池子 ${pool.address} 总代币数量计算完成:`);
-      this.logger.log(`  Token0: ${result.amount0Formatted}`);
-      this.logger.log(`  Token1: ${result.amount1Formatted}`);
-      this.logger.log(`  处理的Ticks: ${result.ticksProcessed}`);
-    } catch (error) {
-      this.logger.error(`计算池子 ${pool.address} 总代币数量失败:`, error);
-    }
-  }
 
   /**
-   * 扫描并存储tick数据
+   * 扫描并存储tick数据，同时计算总代币数量
    */
   private async scanAndStoreTicks(pool: Pool, poolInfo: any) {
     const tickSpacing = poolInfo.tickSpacing;
@@ -192,53 +148,95 @@ export class LiquidityCollectorService {
     }
     initializedTicks.sort((a, b) => a.tick - b.tick);
 
-    // 区间 token 数量计算
-    const tickDataArray: any[] = [];
+    // 计算总代币数量
+    let totalAmount0 = ethers.BigNumber.from(0);
+    let totalAmount1 = ethers.BigNumber.from(0);
     let activeLiquidity = ethers.BigNumber.from(0);
-    for (let i = 1; i < initializedTicks.length; i++) {
-      // 累加前一个 tick 的 liquidityNet
-      activeLiquidity = activeLiquidity.add(initializedTicks[i - 1].liquidityNet);
-      if (activeLiquidity.lte(0)) continue;
-      const tickLower = initializedTicks[i - 1].tick;
-      const tickUpper = initializedTicks[i].tick;
-      // 计算区间价格（用 tickLower）
-      const token0 = new Token(
-        this.configService.get<number>("ethereum.chainId"),
-        pool.token0Address,
-        pool.token0Decimals,
-        pool.token0Symbol,
-        pool.token0Symbol
-      );
-      const token1 = new Token(
-        this.configService.get<number>("ethereum.chainId"),
-        pool.token1Address,
-        pool.token1Decimals,
-        pool.token1Symbol,
-        pool.token1Symbol,
-      );
-      const price = this.uniswapUtils.calculateTickPrice(tickLower, token0, token1);
+
+    // 区间 token 数量计算和存储
+    const tickDataArray: any[] = [];
+    for (let i = 0; i < initializedTicks.length; i++) {
+      if (i > 0 && activeLiquidity.gt(0)) {
+        const lowerTick = initializedTicks[i - 1].tick;
+        const upperTick = initializedTicks[i].tick;
+        if (lowerTick < upperTick) {
+          const { amount0, amount1 } = this.liquidityCalculator.calculateTokenAmountsInRange(
+            activeLiquidity,
+            lowerTick,
+            upperTick,
+            poolInfo.currentTick,
+            ethers.BigNumber.from(poolInfo.currentSqrtPriceX96),
+          );
+          totalAmount0 = totalAmount0.add(amount0);
+          totalAmount1 = totalAmount1.add(amount1);
+
+          // 计算区间价格（用 tickLower）
+          const token0 = new Token(
+            this.configService.get<number>("ethereum.chainId"),
+            pool.token0Address,
+            pool.token0Decimals,
+            pool.token0Symbol,
+            pool.token0Symbol
+          );
+          const token1 = new Token(
+            this.configService.get<number>("ethereum.chainId"),
+            pool.token1Address,
+            pool.token1Decimals,
+            pool.token1Symbol,
+            pool.token1Symbol,
+          );
+          const price = this.uniswapUtils.calculateTickPrice(lowerTick, token0, token1);
+          tickDataArray.push({
+            poolAddress: pool.address,
+            tick: lowerTick,
+            price,
+            liquidityGross: initializedTicks[i - 1].liquidityGross.toString(),
+            liquidityNet: initializedTicks[i - 1].liquidityNet.toString(),
+            initialized: true,
+            token0Amount: amount0.toString(),
+            token1Amount: amount1.toString(),
+            token0AmountFormatted: this.uniswapUtils.formatTokenAmount(amount0, pool.token0Decimals),
+            token1AmountFormatted: this.uniswapUtils.formatTokenAmount(amount1, pool.token1Decimals),
+            blockNumber: latestBlock.number,
+            blockTimestamp: new Date(latestBlock.timestamp * 1000),
+          });
+        }
+      }
+      activeLiquidity = activeLiquidity.add(initializedTicks[i].liquidityNet);
+      if (activeLiquidity.lt(0)) {
+        this.logger.warn(`Negative liquidity at tick ${initializedTicks[i].tick}`);
+        activeLiquidity = ethers.BigNumber.from(0);
+      }
+    }
+
+    // 处理最后一个区间（如果当前价格在最后一个tick之后）
+    if (
+      initializedTicks.length > 0 &&
+      poolInfo.currentTick > initializedTicks[initializedTicks.length - 1].tick &&
+      activeLiquidity.gt(0)
+    ) {
+      const lowerTick = initializedTicks[initializedTicks.length - 1].tick;
+      const upperTick = poolInfo.currentTick + tickSpacing;
       const { amount0, amount1 } = this.liquidityCalculator.calculateTokenAmountsInRange(
         activeLiquidity,
-        tickLower,
-        tickUpper,
+        lowerTick,
+        upperTick,
         poolInfo.currentTick,
         ethers.BigNumber.from(poolInfo.currentSqrtPriceX96),
       );
-      tickDataArray.push({
-        poolAddress: pool.address,
-        tick: tickLower,
-        price,
-        liquidityGross: initializedTicks[i - 1].liquidityGross.toString(),
-        liquidityNet: initializedTicks[i - 1].liquidityNet.toString(),
-        initialized: true,
-        token0Amount: amount0.toString(),
-        token1Amount: amount1.toString(),
-        token0AmountFormatted: this.uniswapUtils.formatTokenAmount(amount0, pool.token0Decimals),
-        token1AmountFormatted: this.uniswapUtils.formatTokenAmount(amount1, pool.token1Decimals),
-        blockNumber: latestBlock.number,
-        blockTimestamp: new Date(latestBlock.timestamp * 1000),
-      });
+      totalAmount0 = totalAmount0.add(amount0);
+      totalAmount1 = totalAmount1.add(amount1);
     }
+
+    // 更新池子的总代币数量
+    pool.totalAmount0 = totalAmount0.toString();
+    pool.totalAmount1 = totalAmount1.toString();
+    await this.poolRepository.save(pool);
+
+    this.logger.log(`池子 ${pool.address} 总代币数量计算完成:`);
+    this.logger.log(`  Token0: ${this.uniswapUtils.formatTokenAmount(totalAmount0, pool.token0Decimals)}`);
+    this.logger.log(`  Token1: ${this.uniswapUtils.formatTokenAmount(totalAmount1, pool.token1Decimals)}`);
+    this.logger.log(`  处理的Ticks: ${initializedTicks.length}`);
 
     if (tickDataArray.length > 0) {
       await this.insertTickLiquidity(tickDataArray);

@@ -4,10 +4,13 @@ import { TypeOrmModule } from "@nestjs/typeorm";
 import { ScheduleModule } from "@nestjs/schedule";
 import { Pool } from "./entities/pool.entity";
 import { TickLiquidity } from "./entities/tick-liquidity.entity";
+import { PoolDailyRevenue } from "./entities/pool-daily-revenue.entity";
 import { PoolController } from "./controllers/pool.controller";
 import { LiquidityController } from "./controllers/liquidity.controller";
+import { RevenueController } from "./controllers/revenue.controller";
 import { PoolManagerService } from "./services/pool-manager.service";
 import { LiquidityCollectorService } from "./services/liquidity-collector.service";
+import { PoolRevenueCollectorService } from "./services/pool-revenue-collector.service";
 import databaseConfig from "./config/database.config";
 import ethereumConfig from "./config/ethereum.config";
 import appConfig from "./config/configuration";
@@ -28,15 +31,15 @@ import appConfig from "./config/configuration";
         database: process.env.DB_NAME || "uniswap_v3_analyzer",
         ssl:
           process.env.DB_SSL === "true" ? { rejectUnauthorized: false } : false,
-        entities: [Pool, TickLiquidity],
+        entities: [Pool, TickLiquidity, PoolDailyRevenue],
         synchronize: false, // 开发环境使用，生产环境应该关闭
         logging: true,
       }),
     }),
-    TypeOrmModule.forFeature([Pool, TickLiquidity]),
+    TypeOrmModule.forFeature([Pool, TickLiquidity, PoolDailyRevenue]),
     ScheduleModule.forRoot(),
   ],
-  controllers: [PoolController, LiquidityController],
-  providers: [PoolManagerService, LiquidityCollectorService],
+  controllers: [PoolController, LiquidityController, RevenueController],
+  providers: [PoolManagerService, LiquidityCollectorService, PoolRevenueCollectorService],
 })
 export class AppModule { }

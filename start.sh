@@ -3,24 +3,24 @@
 echo "🚀 启动 Uniswap V3 流动性分析器项目..."
 echo "=================================="
 
-# 检查 Docker 是否运行
-if ! docker info > /dev/null 2>&1; then
-    echo "⚠️  Docker 未运行，请先启动 Docker"
-    exit 1
-fi
+# # 检查 Docker 是否运行
+# if ! docker info > /dev/null 2>&1; then
+#     echo "⚠️  Docker 未运行，请先启动 Docker"
+#     exit 1
+# fi
 
-# 启动 PostgreSQL 数据库
-echo "🗄️  启动 PostgreSQL 数据库..."
-docker run -d \
-    --name uniswap-v3-postgres \
-    -e POSTGRES_DB=uniswap_v3_analyzer \
-    -e POSTGRES_USER=postgres \
-    -e POSTGRES_PASSWORD=password \
-    -p 5432:5432 \
-    postgres:13
+# # 启动 PostgreSQL 数据库
+# echo "🗄️  启动 PostgreSQL 数据库..."
+# docker run -d \
+#     --name uniswap-v3-postgres \
+#     -e POSTGRES_DB=uniswap_v3_analyzer \
+#     -e POSTGRES_USER=postgres \
+#     -e POSTGRES_PASSWORD=123456 \
+#     -p 5432:5432 \
+#     postgres:13
 
-echo "⏳ 等待数据库启动..."
-sleep 10
+# echo "⏳ 等待数据库启动..."
+# sleep 10
 
 # 启动后端服务
 echo "🔧 启动后端服务..."

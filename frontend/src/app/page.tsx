@@ -18,8 +18,16 @@ export default function Home() {
   const loadPools = async () => {
     try {
       setLoading(true)
-      const data = await poolApi.getAllPools()
-      setPools(data)
+      const response = await poolApi.getAllPools()
+
+      // 检查响应格式
+      if (Array.isArray(response)) {
+        setPools(response)
+      } else if (response.success && response.data) {
+        setPools(response.data)
+      } else if (response.data && Array.isArray(response.data)) {
+        setPools(response.data)
+      }
     } catch (error) {
       console.error("加载池子失败:", error)
     } finally {
@@ -57,7 +65,7 @@ export default function Home() {
           </p>
         </div>
 
-        {/* 操作栏 */}
+        {/* 导航栏 */}
         <div className="mb-6 flex justify-between items-center">
           <div className="flex space-x-4">
             <button
@@ -67,6 +75,18 @@ export default function Home() {
               <PlusIcon className="h-4 w-4 mr-2" />
               添加池子
             </button>
+            <a
+              href="/revenue"
+              className="inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md shadow-sm text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+            >
+              收益分析
+            </a>
+            <a
+              href="/admin"
+              className="inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md shadow-sm text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+            >
+              管理后台
+            </a>
           </div>
         </div>
 
