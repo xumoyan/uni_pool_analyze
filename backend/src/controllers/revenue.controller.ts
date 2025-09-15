@@ -267,11 +267,11 @@ export class RevenueController {
       this.logger.log("手动触发所有池子的最新收益数据收集");
 
       // 调用新的收集最新数据方法
-      await this.poolRevenueCollectorService.collectLatestRevenueData();
+      this.poolRevenueCollectorService.collectLatestRevenueData();
 
       return {
         success: true,
-        message: "所有池子最新收益数据收集完成",
+        message: "所有池子最新收益数据收集中",
       };
     } catch (error) {
       this.logger.error("触发收益数据收集失败:", error);

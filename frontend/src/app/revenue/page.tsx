@@ -15,8 +15,8 @@ export default function RevenuePage() {
     setSyncStatus("正在收集最新收益数据...")
 
     try {
-      await revenueApi.collectAllPoolsRevenue()
-      setSyncStatus("所有池子最新收益数据收集完成")
+      revenueApi.collectAllPoolsRevenue()
+      setSyncStatus("所有池子最新收益数据收集中")
     } catch (error) {
       console.error("收集收益数据失败:", error)
       setSyncStatus("收集收益数据失败")
