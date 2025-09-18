@@ -1333,21 +1333,37 @@ export class LiquidityV4CollectorService {
     const recalculatedData: any[] = [];
 
     try {
-      // 创建 Token 对象
+      // 🔥 修复 ETH 地址问题：创建 Token 对象
+      const chainId = this.configService.get<number>("ethereum.chainId");
+
+      // 处理 ETH 地址和 USDT decimals 问题
+      const token0Address = pool.token0Address === '0x0000000000000000000000000000000000000000'
+        ? '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2' // WETH 地址作为替代
+        : pool.token0Address;
+      const token1Address = pool.token1Address === '0x0000000000000000000000000000000000000000'
+        ? '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2' // WETH 地址作为替代
+        : pool.token1Address;
+
+      // 🔥 修复 USDT decimals 问题
+      const token0Decimals = pool.token0Address === '0x0000000000000000000000000000000000000000' ? 18 : pool.token0Decimals;
+      const token1Decimals = pool.token1Address === '0xdAC17F958D2ee523a2206206994597C13D831ec7' ? 6 : pool.token1Decimals; // USDT 是 6 decimals
+
       const token0 = new Token(
-        this.configService.get<number>("ethereum.chainId"),
-        pool.token0Address,
-        pool.token0Decimals,
-        pool.token0Symbol,
-        pool.token0Symbol
+        chainId,
+        token0Address,
+        token0Decimals,
+        pool.token0Symbol || 'ETH',
+        pool.token0Symbol || 'ETH'
       );
       const token1 = new Token(
-        this.configService.get<number>("ethereum.chainId"),
-        pool.token1Address,
-        pool.token1Decimals,
-        pool.token1Symbol,
-        pool.token1Symbol
+        chainId,
+        token1Address,
+        token1Decimals,
+        pool.token1Symbol || 'USDT',
+        pool.token1Symbol || 'USDT'
       );
+
+      this.logger.log(`Token 对象创建: Token0=${token0.symbol}(${token0.decimals}), Token1=${token1.symbol}(${token1.decimals})`);
 
       // 重新计算每个区间的流动性分布
       for (let i = 0; i < existingData.length - 1; i++) {
@@ -1483,21 +1499,35 @@ export class LiquidityV4CollectorService {
           currentSqrtPriceX96
         );
 
-        // 计算价格
+        // 计算价格（使用修复后的 Token 对象）
+        const chainId = this.configService.get<number>("ethereum.chainId");
+
+        // 处理 ETH 地址和 USDT decimals 问题
+        const token0Address = pool.token0Address === '0x0000000000000000000000000000000000000000'
+          ? '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2' // WETH 地址
+          : pool.token0Address;
+        const token1Address = pool.token1Address === '0x0000000000000000000000000000000000000000'
+          ? '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2' // WETH 地址
+          : pool.token1Address;
+
+        const token0Decimals = pool.token0Address === '0x0000000000000000000000000000000000000000' ? 18 : pool.token0Decimals;
+        const token1Decimals = pool.token1Address === '0xdAC17F958D2ee523a2206206994597C13D831ec7' ? 6 : pool.token1Decimals; // USDT 是 6 decimals
+
         const token0 = new Token(
-          this.configService.get<number>("ethereum.chainId"),
-          pool.token0Address,
-          pool.token0Decimals,
-          pool.token0Symbol,
-          pool.token0Symbol
+          chainId,
+          token0Address,
+          token0Decimals,
+          pool.token0Symbol || 'ETH',
+          pool.token0Symbol || 'ETH'
         );
         const token1 = new Token(
-          this.configService.get<number>("ethereum.chainId"),
-          pool.token1Address,
-          pool.token1Decimals,
-          pool.token1Symbol,
-          pool.token1Symbol
+          chainId,
+          token1Address,
+          token1Decimals,
+          pool.token1Symbol || 'USDT',
+          pool.token1Symbol || 'USDT'
         );
+
         const price = this.uniswapV4Utils.calculateTickPrice(lowerTick, token0, token1);
 
         tickDataArray.push({

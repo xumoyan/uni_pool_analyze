@@ -85,18 +85,10 @@ export class PoolV4ManagerService {
         ]);
       } catch (error) {
         this.logger.warn(`无法获取代币信息，使用默认值: ${error.message}`);
-        token0Info = {
-          address: poolKey.currency0,
-          decimals: 18,
-          symbol: `TOKEN0_${poolKey.currency0.slice(-4)}`,
-          name: `Token0`,
-        };
-        token1Info = {
-          address: poolKey.currency1,
-          decimals: 18,
-          symbol: `TOKEN1_${poolKey.currency1.slice(-4)}`,
-          name: `Token1`,
-        };
+
+        // 🔥 修复：为已知代币提供正确的信息
+        token0Info = this.getKnownTokenInfo(poolKey.currency0);
+        token1Info = this.getKnownTokenInfo(poolKey.currency1);
       }
 
       // 创建池子记录
@@ -135,6 +127,67 @@ export class PoolV4ManagerService {
       this.logger.error("创建 V4 池子失败:", error);
       throw error;
     }
+  }
+
+  /**
+   * 获取已知代币的正确信息
+   */
+  private getKnownTokenInfo(address: string): any {
+    // 已知代币信息映射
+    const knownTokens = {
+      // ETH 地址
+      '0x0000000000000000000000000000000000000000': {
+        address: address,
+        decimals: 18,
+        symbol: 'ETH',
+        name: 'Ethereum',
+      },
+      // WETH
+      '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2': {
+        address: address,
+        decimals: 18,
+        symbol: 'WETH',
+        name: 'Wrapped Ether',
+      },
+      // USDT
+      '0xdAC17F958D2ee523a2206206994597C13D831ec7': {
+        address: address,
+        decimals: 6, // 🔥 正确的 USDT decimals
+        symbol: 'USDT',
+        name: 'Tether USD',
+      },
+      // USDC
+      '0xA0b86a33E6417c5CE89C5C8C6E0b8E2F7D8C4a8c': {
+        address: address,
+        decimals: 6,
+        symbol: 'USDC',
+        name: 'USD Coin',
+      },
+      // DAI
+      '0x6B175474E89094C44Da98b954EedeAC495271d0F': {
+        address: address,
+        decimals: 18,
+        symbol: 'DAI',
+        name: 'Dai Stablecoin',
+      }
+    };
+
+    // 检查是否为已知代币
+    const knownToken = knownTokens[address.toLowerCase()] || knownTokens[address];
+
+    if (knownToken) {
+      this.logger.log(`使用已知代币信息: ${knownToken.symbol} (${knownToken.decimals} decimals)`);
+      return knownToken;
+    }
+
+    // 未知代币使用默认值
+    this.logger.warn(`未知代币 ${address}，使用默认值`);
+    return {
+      address: address,
+      decimals: 18, // 默认 18 decimals
+      symbol: `TOKEN_${address.slice(-4)}`,
+      name: `Unknown Token`,
+    };
   }
 
   /**

@@ -10,6 +10,8 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@uniswap/sdk-core": "^7.7.2",
+    "@uniswap/v3-sdk": "^3.25.2",
     "axios": "^1.11.0",
     "ethers": "^6.15.0",
     "pg": "^8.16.3"

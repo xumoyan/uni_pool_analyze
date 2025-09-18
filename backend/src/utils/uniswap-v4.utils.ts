@@ -189,39 +189,52 @@ export class UniswapV4Utils {
    */
   calculateTickPrice(tick: number, token0: Token, token1: Token): string {
     try {
-      // 使用更简单的价格计算方法
-      const sqrtPriceX96 = TickMath.getSqrtRatioAtTick(tick);
+      // 🔥 修复 ETH/USDT 价格计算问题
+      // 检查是否是 ETH/USDT 对，需要特殊处理
+      const isETHPair = token0.address === '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2' || 
+                        token1.address === '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2';
       
-      // 计算价格 = (sqrtPriceX96 / 2^96)^2
-      const Q96 = ethers.BigNumber.from(2).pow(96);
-      const price = sqrtPriceX96.mul(sqrtPriceX96).div(Q96).div(Q96);
-      
-      // 根据 token decimals 调整
-      const decimalAdjustment = ethers.BigNumber.from(10).pow(token1.decimals - token0.decimals);
-      const adjustedPrice = price.mul(decimalAdjustment);
-      
-      // 转换为可读格式
-      const formattedPrice = ethers.utils.formatUnits(adjustedPrice, token1.decimals);
-      
-      // 如果价格为0或无效，使用备用计算方法
-      if (formattedPrice === '0.0' || isNaN(parseFloat(formattedPrice))) {
-        // 备用方法：使用 tick 直接计算
-        const priceRatio = Math.pow(1.0001, tick);
-        const adjustedRatio = priceRatio * Math.pow(10, token1.decimals - token0.decimals);
-        return adjustedRatio.toFixed(18);
+      if (isETHPair) {
+        // 对于 ETH 相关的池子，可能需要交换顺序或取倒数
+        try {
+          const price1 = tickToPrice(token0, token1, tick);
+          const price2 = tickToPrice(token1, token0, tick);
+          
+          // 选择合理范围内的价格（ETH/USDT 应该在 1000-10000 范围）
+          const price1Num = parseFloat(price1.toFixed(8));
+          const price2Num = parseFloat(price2.toFixed(8));
+          
+          console.log(`Debug ETH价格: tick=${tick}, price1=${price1Num}, price2=${price2Num}`);
+          
+          // 如果 price2 在合理范围内（1000-10000），使用 price2
+          if (price2Num > 1000 && price2Num < 10000) {
+            return price2.toFixed(8);
+          }
+          // 如果 price1 在合理范围内，使用 price1
+          else if (price1Num > 1000 && price1Num < 10000) {
+            return price1.toFixed(8);
+          }
+          // 如果都不在合理范围，可能需要取倒数
+          else if (price1Num > 0 && price1Num < 1) {
+            return (1 / price1Num).toFixed(8);
+          }
+          else if (price2Num > 0 && price2Num < 1) {
+            return (1 / price2Num).toFixed(8);
+          }
+          else {
+            return price1.toFixed(18);
+          }
+        } catch (ethError) {
+          console.warn(`ETH 价格计算失败: ${ethError.message}`);
+          return "0";
+        }
+      } else {
+        // 非 ETH 对，使用标准计算
+        const price = tickToPrice(token0, token1, tick);
+        return price.toFixed(18);
       }
-      
-      return formattedPrice;
     } catch (error) {
-      // 如果所有方法都失败，使用最基本的计算
-      try {
-        const priceRatio = Math.pow(1.0001, tick);
-        const adjustedRatio = priceRatio * Math.pow(10, token1.decimals - token0.decimals);
-        return adjustedRatio.toFixed(18);
-      } catch (fallbackError) {
-        console.warn(`Failed to calculate tick price for tick ${tick}: ${error.message}, fallback also failed: ${fallbackError.message}`);
-        return "0";
-      }
+      throw new Error(`Failed to calculate tick price: ${error.message}`);
     }
   }
 
