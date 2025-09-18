@@ -1,11 +1,18 @@
 "use client"
 
 import { useState } from "react"
-import { Pool, CreatePoolDto, poolApi } from "@/services/api"
+import {
+  Pool,
+  PoolV4,
+  CreatePoolDto,
+  CreatePoolV4Dto,
+  poolApi,
+  poolV4Api,
+} from "@/services/api"
 import { XMarkIcon } from "@heroicons/react/24/outline"
 
 interface CreatePoolFormProps {
-  onPoolCreated: (pool: Pool) => void
+  onPoolCreated: (pool: Pool | PoolV4) => void
   onCancel: () => void
 }
 
@@ -13,10 +20,18 @@ export default function CreatePoolForm({
   onPoolCreated,
   onCancel,
 }: CreatePoolFormProps) {
+  const [version, setVersion] = useState<"v3" | "v4">("v3")
   const [formData, setFormData] = useState<CreatePoolDto>({
     token0Address: "",
     token1Address: "",
     feeTier: 3000,
+  })
+  const [v4FormData, setV4FormData] = useState<CreatePoolV4Dto>({
+    token0Address: "",
+    token1Address: "",
+    feeTier: 3000,
+    tickSpacing: 60,
+    hooksAddress: "0x0000000000000000000000000000000000000000",
   })
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState("")
@@ -24,12 +39,14 @@ export default function CreatePoolForm({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
 
-    if (!formData.token0Address || !formData.token1Address) {
+    const currentFormData = version === "v3" ? formData : v4FormData
+
+    if (!currentFormData.token0Address || !currentFormData.token1Address) {
       setError("请填写所有必填字段")
       return
     }
 
-    if (formData.token0Address === formData.token1Address) {
+    if (currentFormData.token0Address === currentFormData.token1Address) {
       setError("两个代币地址不能相同")
       return
     }
@@ -38,10 +55,28 @@ export default function CreatePoolForm({
       setLoading(true)
       setError("")
 
-      const newPool = await poolApi.createPool(formData)
-      onPoolCreated(newPool)
-    } catch (error: any) {
-      setError(error.response?.data?.message || error.message || "创建池子失败")
+      let newPool
+      if (version === "v3") {
+        newPool = await poolApi.createPool(formData)
+      } else {
+        // 调用 V4 API
+        newPool = await poolV4Api.createPoolV4(v4FormData)
+      }
+
+      onPoolCreated(newPool as unknown as Pool | PoolV4)
+    } catch (error: unknown) {
+      const errorMessage =
+        error instanceof Error
+          ? error.message
+          : (
+              error as {
+                response?: { data?: { message?: string } }
+                message?: string
+              }
+            )?.response?.data?.message ||
+            (error as { message?: string })?.message ||
+            "创建池子失败"
+      setError(errorMessage)
     } finally {
       setLoading(false)
     }
@@ -70,6 +105,35 @@ export default function CreatePoolForm({
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-4">
+            {/* 版本选择 */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Uniswap 版本 *
+              </label>
+              <div className="flex space-x-4">
+                <label className="flex items-center">
+                  <input
+                    type="radio"
+                    value="v3"
+                    checked={version === "v3"}
+                    onChange={(e) => setVersion(e.target.value as "v3" | "v4")}
+                    className="mr-2"
+                  />
+                  <span className="text-sm text-gray-700">V3 (传统池子)</span>
+                </label>
+                <label className="flex items-center">
+                  <input
+                    type="radio"
+                    value="v4"
+                    checked={version === "v4"}
+                    onChange={(e) => setVersion(e.target.value as "v3" | "v4")}
+                    className="mr-2"
+                  />
+                  <span className="text-sm text-gray-700">V4 (新版本)</span>
+                </label>
+              </div>
+            </div>
+
             <div>
               <label
                 htmlFor="token0Address"
@@ -80,10 +144,22 @@ export default function CreatePoolForm({
               <input
                 type="text"
                 id="token0Address"
-                value={formData.token0Address}
-                onChange={(e) =>
-                  handleInputChange("token0Address", e.target.value)
+                value={
+                  version === "v3"
+                    ? formData.token0Address
+                    : v4FormData.token0Address
                 }
+                onChange={(e) => {
+                  if (version === "v3") {
+                    handleInputChange("token0Address", e.target.value)
+                  } else {
+                    setV4FormData((prev) => ({
+                      ...prev,
+                      token0Address: e.target.value,
+                    }))
+                    setError("")
+                  }
+                }}
                 className="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 placeholder="0x..."
                 required
@@ -100,10 +176,22 @@ export default function CreatePoolForm({
               <input
                 type="text"
                 id="token1Address"
-                value={formData.token1Address}
-                onChange={(e) =>
-                  handleInputChange("token1Address", e.target.value)
+                value={
+                  version === "v3"
+                    ? formData.token1Address
+                    : v4FormData.token1Address
                 }
+                onChange={(e) => {
+                  if (version === "v3") {
+                    handleInputChange("token1Address", e.target.value)
+                  } else {
+                    setV4FormData((prev) => ({
+                      ...prev,
+                      token1Address: e.target.value,
+                    }))
+                    setError("")
+                  }
+                }}
                 className="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 placeholder="0x..."
                 required
@@ -119,10 +207,18 @@ export default function CreatePoolForm({
               </label>
               <select
                 id="feeTier"
-                value={formData.feeTier}
-                onChange={(e) =>
-                  handleInputChange("feeTier", parseInt(e.target.value))
-                }
+                value={version === "v3" ? formData.feeTier : v4FormData.feeTier}
+                onChange={(e) => {
+                  if (version === "v3") {
+                    handleInputChange("feeTier", parseInt(e.target.value))
+                  } else {
+                    setV4FormData((prev) => ({
+                      ...prev,
+                      feeTier: parseInt(e.target.value),
+                    }))
+                    setError("")
+                  }
+                }}
                 className="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 required
               >
@@ -132,6 +228,67 @@ export default function CreatePoolForm({
                 <option value={10000}>1% (10000)</option>
               </select>
             </div>
+
+            {/* V4 特有字段 */}
+            {version === "v4" && (
+              <>
+                <div>
+                  <label
+                    htmlFor="tickSpacing"
+                    className="block text-sm font-medium text-gray-700"
+                  >
+                    Tick 间距 *
+                  </label>
+                  <select
+                    id="tickSpacing"
+                    value={v4FormData.tickSpacing}
+                    onChange={(e) => {
+                      setV4FormData((prev) => ({
+                        ...prev,
+                        tickSpacing: parseInt(e.target.value),
+                      }))
+                      setError("")
+                    }}
+                    className="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    required
+                  >
+                    <option value={1}>1 (0.01% 费率推荐)</option>
+                    <option value={10}>10 (0.05% 费率推荐)</option>
+                    <option value={60}>60 (0.3% 费率推荐)</option>
+                    <option value={200}>200 (1% 费率推荐)</option>
+                  </select>
+                  <p className="mt-1 text-sm text-gray-500">
+                    Tick 间距决定了流动性的精细度，通常与费率相匹配
+                  </p>
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="hooksAddress"
+                    className="block text-sm font-medium text-gray-700"
+                  >
+                    Hooks 合约地址
+                  </label>
+                  <input
+                    type="text"
+                    id="hooksAddress"
+                    value={v4FormData.hooksAddress || ""}
+                    onChange={(e) => {
+                      setV4FormData((prev) => ({
+                        ...prev,
+                        hooksAddress: e.target.value,
+                      }))
+                      setError("")
+                    }}
+                    className="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    placeholder="0x0000000000000000000000000000000000000000 (无 hooks)"
+                  />
+                  <p className="mt-1 text-sm text-gray-500">
+                    可选：自定义 hooks 合约地址，留空则使用零地址（无 hooks）
+                  </p>
+                </div>
+              </>
+            )}
 
             {error && (
               <div className="text-red-600 text-sm bg-red-50 border border-red-200 rounded-md px-3 py-2">

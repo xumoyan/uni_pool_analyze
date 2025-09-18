@@ -1,55 +1,23 @@
 "use client"
 
-import { useState, useEffect } from "react"
-import { Pool, poolApi } from "@/services/api"
-import PoolList from "@/components/PoolList"
+import { useState } from "react"
+import { Pool, PoolV4 } from "@/services/api"
+import UnifiedPoolList from "@/components/UnifiedPoolList"
 import CreatePoolForm from "@/components/CreatePoolForm"
 import { PlusIcon } from "@heroicons/react/24/outline"
 
 export default function Home() {
-  const [pools, setPools] = useState<Pool[]>([])
-  const [loading, setLoading] = useState(true)
   const [showCreateForm, setShowCreateForm] = useState(false)
+  const [refreshKey, setRefreshKey] = useState(0)
 
-  useEffect(() => {
-    loadPools()
-  }, [])
-
-  const loadPools = async () => {
-    try {
-      setLoading(true)
-      const response = await poolApi.getAllPools()
-
-      // 检查响应格式
-      if (Array.isArray(response)) {
-        setPools(response)
-      } else if (response.success && response.data) {
-        setPools(response.data)
-      } else if (response.data && Array.isArray(response.data)) {
-        setPools(response.data)
-      }
-    } catch (error) {
-      console.error("加载池子失败:", error)
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const handlePoolCreated = (newPool: Pool) => {
-    setPools([newPool, ...pools])
+  const handlePoolCreated = () => {
     setShowCreateForm(false)
+    // 触发列表刷新
+    setRefreshKey((prev) => prev + 1)
   }
 
-  const handlePoolDeleted = (poolAddress: string) => {
-    setPools(pools.filter((pool) => pool.address !== poolAddress))
-  }
-
-  const handlePoolStatusUpdated = (poolAddress: string, isActive: boolean) => {
-    setPools(
-      pools.map((pool) =>
-        pool.address === poolAddress ? { ...pool, isActive } : pool
-      )
-    )
+  const handleRefresh = () => {
+    setRefreshKey((prev) => prev + 1)
   }
 
   return (
@@ -58,10 +26,10 @@ export default function Home() {
         {/* 头部 */}
         <div className="mb-8">
           <h1 className="text-3xl font-bold text-gray-900">
-            Uniswap V3 流动性分析器
+            Uniswap V3/V4 流动性分析器
           </h1>
           <p className="mt-2 text-gray-600">
-            实时监控和分析 Uniswap V3 池子的流动性分布情况
+            实时监控和分析 Uniswap V3 和 V4 池子的流动性分布情况
           </p>
         </div>
 
@@ -91,40 +59,7 @@ export default function Home() {
         </div>
 
         {/* 池子列表 */}
-        {loading ? (
-          <div className="text-center py-12">
-            <div className="inline-flex items-center px-4 py-2 text-sm font-medium text-gray-500">
-              <svg
-                className="animate-spin -ml-1 mr-3 h-5 w-5 text-gray-500"
-                xmlns="http://www.w3.org/2000/svg"
-                fill="none"
-                viewBox="0 0 24 24"
-              >
-                <circle
-                  className="opacity-25"
-                  cx="12"
-                  cy="12"
-                  r="10"
-                  stroke="currentColor"
-                  strokeWidth="4"
-                ></circle>
-                <path
-                  className="opacity-75"
-                  fill="currentColor"
-                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                ></path>
-              </svg>
-              加载中...
-            </div>
-          </div>
-        ) : (
-          <PoolList
-            pools={pools}
-            onPoolDeleted={handlePoolDeleted}
-            onPoolStatusUpdated={handlePoolStatusUpdated}
-            onRefresh={loadPools}
-          />
-        )}
+        <UnifiedPoolList key={refreshKey} onRefresh={handleRefresh} />
 
         {/* 创建池子表单 */}
         {showCreateForm && (

@@ -8,6 +8,7 @@ import {
   JoinColumn,
 } from "typeorm";
 import { Pool } from "./pool.entity";
+import { PoolV4 } from "./pool-v4.entity";
 
 @Entity("tick_liquidity_data")
 export class TickLiquidity {
@@ -85,4 +86,16 @@ export class TickLiquidity {
   @ManyToOne(() => Pool, (pool) => pool.tickLiquidities)
   @JoinColumn({ name: "pool_address", referencedColumnName: "address" })
   pool: Pool;
+
+  // V4 支持：通过 PoolId 关联
+  @Column({ name: "pool_id", nullable: true, length: 66 })
+  poolId: string;
+
+  @ManyToOne(() => PoolV4, (poolV4) => poolV4.tickLiquidities)
+  @JoinColumn({ name: "pool_id", referencedColumnName: "poolId" })
+  poolV4: PoolV4;
+
+  // 版本标识
+  @Column({ default: "v3" })
+  version: string;
 }

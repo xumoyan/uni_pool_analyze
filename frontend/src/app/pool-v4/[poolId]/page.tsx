@@ -1,16 +1,15 @@
-// frontend/src/app/pool/[address]/page.tsx
 "use client"
 
 import { useState, useEffect } from "react"
 import { useParams } from "next/navigation"
 import {
-  Pool,
-  liquidityApi,
-  poolApi,
+  PoolV4,
+  liquidityV4Api,
+  poolV4Api,
   LiquidityStats,
   LiquidityDistribution,
 } from "@/services/api"
-import { ChartBarIcon, ArrowPathIcon } from "@heroicons/react/24/outline"
+import { ChartBarIcon, ArrowPathIcon, ClipboardIcon } from "@heroicons/react/24/outline"
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -35,9 +34,9 @@ ChartJS.register(
   Legend
 )
 
-interface LiquidityData {
+interface LiquidityV4Data {
   id: number
-  poolAddress: string
+  poolId: string
   tick: number
   price: number
   liquidityGross: string
@@ -56,16 +55,15 @@ interface LiquidityData {
   blockTimestamp: Date
 }
 
-export default function PoolDetailPage() {
-  // 柱状图分页状态（与表格分页分离）
+export default function PoolV4DetailPage() {
   const params = useParams()
-  const poolAddress = params.address as string
+  const poolId = params.poolId as string
 
-  const [pool, setPool] = useState<Pool | null>(null)
-  // 所有 tick 数据（最大 blockNumber 下）
-  const [liquidityData, setLiquidityData] = useState<LiquidityData[]>([])
+  const [pool, setPool] = useState<PoolV4 | null>(null)
+  const [liquidityData, setLiquidityData] = useState<LiquidityV4Data[]>([])
+  const [latestBlock, setLatestBlock] = useState<number | null>(null)
 
-  // 柱状图分页状态（与表格分页分离）
+  // 柱状图分页状态
   const [chartPage, setChartPage] = useState(1)
   const [chartPageSize, setChartPageSize] = useState(50)
   const chartTotalPages = Math.ceil(liquidityData.length / chartPageSize)
@@ -82,62 +80,66 @@ export default function PoolDetailPage() {
   const [pageSize, setPageSize] = useState(50)
   const [totalItems, setTotalItems] = useState(0)
 
-  // 新增 state
+  // 价格方向
   const [priceDirection, setPriceDirection] = useState<
     "token0ToToken1" | "token1ToToken0"
   >("token0ToToken1")
 
   useEffect(() => {
-    if (poolAddress) {
+    if (poolId) {
       loadPoolData()
     }
-  }, [poolAddress])
+  }, [poolId])
 
   useEffect(() => {
-    if (poolAddress) {
+    if (poolId) {
       loadAllLiquidityData()
     }
-  }, [poolAddress])
+  }, [poolId])
 
   const loadPoolData = async () => {
     try {
       setLoading(true)
       setError(null)
-      console.log("开始加载池子数据:", poolAddress)
+      console.log("开始加载 V4 池子数据:", poolId)
 
       const [poolData, liquidityStats, distributionData] = await Promise.all([
-        poolApi.getPoolByAddress(poolAddress),
-        liquidityApi.getLiquidityStats(poolAddress),
-        liquidityApi.getLiquidityDistribution(poolAddress, 20),
+        poolV4Api.getPoolByPoolId(poolId),
+        liquidityV4Api.getLiquidityStats(poolId),
+        liquidityV4Api.getLiquidityDistribution(poolId, 20),
       ])
 
       setPool(poolData)
       setStats(liquidityStats)
       setDistribution(distributionData)
+      
+      // 获取最新块高信息
+      if (liquidityStats && liquidityStats.max_block) {
+        setLatestBlock(liquidityStats.max_block)
+      }
     } catch (err: unknown) {
-      console.error("加载池子数据失败:", err)
+      console.error("加载 V4 池子数据失败:", err)
       setError(err instanceof Error ? err.message : "加载失败")
     } finally {
       setLoading(false)
     }
   }
 
-  // 获取最大 blockNumber 下所有初始化 tick 数据
+  // 获取所有流动性数据
   const loadAllLiquidityData = async () => {
     try {
-      // 假设后端支持获取所有 tick 数据（可根据实际接口调整）
-      const response = await liquidityApi.getAllPoolLiquidity(poolAddress)
+      const response = await liquidityV4Api.getAllPoolLiquidity(poolId)
       setLiquidityData(response.data || [])
       setTotalItems(response.data?.length || 0)
     } catch (err: unknown) {
-      console.error("加载所有流动性数据失败:", err)
+      console.error("加载所有 V4 流动性数据失败:", err)
     }
   }
 
   const handleManualCollect = async () => {
     setCollecting(true)
-    poolApi.manualCollect(poolAddress) // 不等待
-    alert("数据收集已触发，请稍后刷新页面查看最新数据")
+    poolV4Api.manualCollect(poolId) // 不等待
+    alert("V4 数据收集已触发，请稍后刷新页面查看最新数据")
     setCollecting(false)
   }
 
@@ -167,13 +169,24 @@ export default function PoolDetailPage() {
     return 1 / price
   }
 
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text)
+    alert("已复制到剪贴板")
+  }
+
+  const formatTokenAmount = (amount: string, decimals: number) => {
+    if (!amount || amount === "0") return "0"
+    const value = parseFloat(amount) / Math.pow(10, decimals)
+    return value.toLocaleString(undefined, { maximumFractionDigits: 6 })
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-50 py-8">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="text-center">
             <div className="animate-spin h-8 w-8 border-4 border-blue-500 border-t-transparent rounded-full mx-auto"></div>
-            <p className="mt-4 text-gray-600">加载中...</p>
+            <p className="mt-4 text-gray-600">加载 V4 池子中...</p>
           </div>
         </div>
       </div>
@@ -204,8 +217,8 @@ export default function PoolDetailPage() {
       <div className="min-h-screen bg-gray-50 py-8">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="text-center">
-            <p className="text-red-600">池子不存在</p>
-            <p className="text-gray-500 mt-2">地址: {poolAddress}</p>
+            <p className="text-red-600">V4 池子不存在</p>
+            <p className="text-gray-500 mt-2">PoolId: {poolId}</p>
           </div>
         </div>
       </div>
@@ -270,14 +283,14 @@ export default function PoolDetailPage() {
       {
         label: `Token1数量 (${pool?.token1Symbol})`,
         data: chartData,
-        backgroundColor: "rgba(59, 130, 246, 0.5)",
-        borderColor: "rgba(59, 130, 246, 1)",
+        backgroundColor: "rgba(147, 51, 234, 0.5)", // 紫色，区分 V4
+        borderColor: "rgba(147, 51, 234, 1)",
         borderWidth: 1,
       },
     ],
   }
 
-  // 明细表分页数据（只保留这一组定义）
+  // 明细表分页数据
   const tablePageStart = (currentPage - 1) * pageSize
   const tablePageEnd = tablePageStart + pageSize
   const tablePageData = liquidityData.slice(tablePageStart, tablePageEnd)
@@ -290,12 +303,12 @@ export default function PoolDetailPage() {
           <div className="flex items-center justify-between">
             <div>
               <h1 className="text-3xl font-bold text-gray-900">
-                {pool.token0Symbol}/{pool.token1Symbol} 流动性分析 (V3)
+                {pool.token0Symbol}/{pool.token1Symbol} 流动性分析 (V4)
               </h1>
-              <p className="mt-2 text-gray-600">池子地址: {pool.address}</p>
-              {stats && stats.max_block && (
+              <p className="mt-2 text-gray-600">PoolId: {pool.poolId}</p>
+              {latestBlock && (
                 <p className="mt-1 text-sm text-gray-500">
-                  最新数据块高: {stats.max_block.toLocaleString()}
+                  最新数据块高: {latestBlock.toLocaleString()}
                 </p>
               )}
             </div>
@@ -303,7 +316,7 @@ export default function PoolDetailPage() {
               <button
                 onClick={handleManualCollect}
                 disabled={collecting}
-                className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50"
+                className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-purple-600 hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500 disabled:opacity-50"
               >
                 {collecting ? (
                   <ArrowPathIcon className="animate-spin h-4 w-4 mr-2" />
@@ -342,9 +355,15 @@ export default function PoolDetailPage() {
           <div className="px-4 py-5 sm:p-6">
             <h3 className="text-lg leading-6 font-medium text-gray-900 mb-4 flex items-center">
               池子信息
-              <span className="ml-2 inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
-                V3
+              <span className="ml-2 inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800">
+                V4
               </span>
+              {pool.hooksAddress &&
+                pool.hooksAddress !== "0x0000000000000000000000000000000000000000" && (
+                  <span className="ml-2 inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-800">
+                    Hooks
+                  </span>
+                )}
             </h3>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
               <div>
@@ -380,6 +399,35 @@ export default function PoolDetailPage() {
                 </dd>
               </div>
             </div>
+            
+            {/* V4 特有信息 */}
+            <div className="mt-6 pt-6 border-t border-gray-200">
+              <h4 className="text-md font-medium text-gray-900 mb-3">V4 特有信息</h4>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <dt className="text-sm font-medium text-gray-500">PoolId</dt>
+                  <dd className="mt-1 text-sm text-gray-900 flex items-center">
+                    <span className="font-mono text-xs">{pool.poolId}</span>
+                    <button
+                      onClick={() => copyToClipboard(pool.poolId)}
+                      className="ml-2 text-gray-400 hover:text-gray-600"
+                    >
+                      <ClipboardIcon className="h-4 w-4" />
+                    </button>
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-sm font-medium text-gray-500">Tick 间距</dt>
+                  <dd className="mt-1 text-sm text-gray-900">{pool.tickSpacing}</dd>
+                </div>
+                {latestBlock && (
+                  <div>
+                    <dt className="text-sm font-medium text-gray-500">最新块高</dt>
+                    <dd className="mt-1 text-sm text-gray-900">{latestBlock.toLocaleString()}</dd>
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
         </div>
 
@@ -408,39 +456,21 @@ export default function PoolDetailPage() {
                   </dd>
                 </div>
               </div>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
                 <div>
                   <dt className="text-sm font-medium text-gray-500">
-                    总 token0 数量
+                    总 {pool.token0Symbol} 数量
                   </dt>
                   <dd className="mt-1 text-2xl font-semibold text-gray-900">
-                    {(() => {
-                      let val = pool.totalAmount0
-                      let num = Number(val)
-                      let decimals = pool.token0Decimals ?? 18
-                      num = num / Math.pow(10, decimals)
-                      return `${num.toLocaleString("en-US", {
-                        minimumFractionDigits: 6,
-                        maximumFractionDigits: 6,
-                      })} ${pool.token0Symbol}`
-                    })()}
+                    {formatTokenAmount(pool.totalAmount0 || "0", pool.token0Decimals)} {pool.token0Symbol}
                   </dd>
                 </div>
                 <div>
                   <dt className="text-sm font-medium text-gray-500">
-                    总 token1 数量
+                    总 {pool.token1Symbol} 数量
                   </dt>
                   <dd className="mt-1 text-2xl font-semibold text-gray-900">
-                    {(() => {
-                      let val = pool.totalAmount1
-                      let num = Number(val)
-                      let decimals = pool.token1Decimals ?? 18
-                      num = num / Math.pow(10, decimals)
-                      return `${num.toLocaleString("en-US", {
-                        minimumFractionDigits: 6,
-                        maximumFractionDigits: 6,
-                      })} ${pool.token1Symbol}`
-                    })()}
+                    {formatTokenAmount(pool.totalAmount1 || "0", pool.token1Decimals)} {pool.token1Symbol}
                   </dd>
                 </div>
               </div>
@@ -452,7 +482,7 @@ export default function PoolDetailPage() {
         <div className="bg-white shadow rounded-lg mb-8">
           <div className="px-4 py-5 sm:p-6">
             <h3 className="text-lg leading-6 font-medium text-gray-900 mb-4">
-              流动性分布
+              V4 流动性分布
             </h3>
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center space-x-2">
@@ -506,7 +536,7 @@ export default function PoolDetailPage() {
                     },
                     title: {
                       display: true,
-                      text: `Token1数量分布图 (每页${chartPageSize}条)`,
+                      text: `V4 Token1数量分布图 (每页${chartPageSize}条)`,
                     },
                     tooltip: {
                       callbacks: {
@@ -551,7 +581,7 @@ export default function PoolDetailPage() {
           <div className="px-4 py-5 sm:p-6">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg leading-6 font-medium text-gray-900">
-                Tick 流动性数据
+                V4 Tick 流动性数据
               </h3>
               <div className="flex items-center space-x-4">
                 <div className="flex items-center space-x-2">
@@ -588,10 +618,10 @@ export default function PoolDetailPage() {
                       流动性
                     </th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Token0 数量
+                      {pool.token0Symbol} 数量
                     </th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Token1 数量
+                      {pool.token1Symbol} 数量
                     </th>
                   </tr>
                 </thead>

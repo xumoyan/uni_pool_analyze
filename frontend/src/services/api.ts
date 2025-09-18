@@ -90,6 +90,46 @@ export interface CreatePoolDto {
   feeTier: number;
 }
 
+// V4 池子接口
+export interface PoolV4 {
+  id: number;
+  poolId: string;
+  token0Address: string;
+  token1Address: string;
+  token0Symbol: string;
+  token1Symbol: string;
+  token0Decimals: number;
+  token1Decimals: number;
+  feeTier: number;
+  tickSpacing: number;
+  hooksAddress: string;
+  poolManagerAddress: string;
+  currentTick: number;
+  totalLiquidity: string;
+  isActive: boolean;
+  version: string;
+  createdAt: string;
+  updatedAt: string;
+  totalAmount0: string;
+  totalAmount1: string;
+  chainId: number;
+  poolKey: {
+    currency0: string;
+    currency1: string;
+    fee: number;
+    tickSpacing: number;
+    hooks: string;
+  };
+}
+
+export interface CreatePoolV4Dto {
+  token0Address: string;
+  token1Address: string;
+  feeTier: number;
+  tickSpacing: number;
+  hooksAddress?: string;
+}
+
 export interface TickLiquidity {
   id: number;
   poolAddress: string;
@@ -154,6 +194,53 @@ export const poolApi = {
   manualCollect: (address: string) => api.post(`/pools/${address}/collect`),
 };
 
+// V4 池子 API
+export const poolV4Api = {
+  // 获取所有 V4 池子
+  getAllPoolsV4: () => api.get<PoolV4[]>('/pools-v4'),
+
+  // 根据 PoolId 获取池子
+  getPoolByPoolId: (poolId: string) => api.get<PoolV4>(`/pools-v4/${poolId}`),
+
+  // 创建新 V4 池子
+  createPoolV4: (data: CreatePoolV4Dto) => api.post<PoolV4>('/pools-v4', data),
+
+  // 计算 PoolId
+  calculatePoolId: (data: CreatePoolV4Dto) =>
+    api.post<{ poolKey: object; poolId: string }>('/pools-v4/calculate-pool-id', data),
+
+  // 根据代币查找池子
+  findPoolByTokens: (
+    token0Address: string,
+    token1Address: string,
+    feeTier: number,
+    tickSpacing: number,
+    hooksAddress?: string
+  ) =>
+    api.get<{ found: boolean; pool?: PoolV4 }>('/pools-v4/find-by-tokens', {
+      params: {
+        token0Address,
+        token1Address,
+        feeTier,
+        tickSpacing,
+        hooksAddress,
+      },
+    }),
+
+  // 获取 V4 池子统计信息
+  getPoolStats: (poolId: string) => api.get<LiquidityStats>(`/pools-v4/${poolId}/stats`),
+
+  // 更新 V4 池子状态
+  updatePoolStatus: (poolId: string, isActive: boolean) =>
+    api.put(`/pools-v4/${poolId}/status`, { isActive }),
+
+  // 删除 V4 池子
+  deletePool: (poolId: string) => api.delete(`/pools-v4/${poolId}`),
+
+  // 手动收集 V4 数据
+  manualCollect: (poolId: string) => api.post(`/pools-v4/${poolId}/collect`),
+};
+
 interface LiquidityResponse {
   data: TickLiquidity[]
   total: number
@@ -189,6 +276,37 @@ export const liquidityApi = {
   // 获取流动性分布
   getLiquidityDistribution: (poolAddress: string, bins = 20) =>
     api.get<DistributionResponse>(`/liquidity/pool/${poolAddress}/distribution`, {
+      params: { bins },
+    }),
+};
+
+// V4 流动性 API
+export const liquidityV4Api = {
+  // 获取 V4 池子流动性数据
+  getPoolLiquidity: (poolId: string, limit = 1000, offset = 0) =>
+    api.get<LiquidityResponse>(`/liquidity-v4/pool/${poolId}`, {
+      params: { limit, offset },
+    }),
+
+  // 获取 V4 池子所有 tick 数据
+  getAllPoolLiquidity: (poolId: string) =>
+    api.get<LiquidityResponse>(`/liquidity-v4/pool/${poolId}`, {
+      params: { limit: 10000, offset: 0 },
+    }),
+
+  // 获取 V4 指定范围的流动性数据
+  getLiquidityInRange: (poolId: string, tickLower: number, tickUpper: number) =>
+    api.get(`/liquidity-v4/pool/${poolId}/range`, {
+      params: { tickLower, tickUpper },
+    }),
+
+  // 获取 V4 流动性统计信息
+  getLiquidityStats: (poolId: string) =>
+    api.get<LiquidityStats>(`/liquidity-v4/pool/${poolId}/stats`),
+
+  // 获取 V4 流动性分布
+  getLiquidityDistribution: (poolId: string, bins = 20) =>
+    api.get<DistributionResponse>(`/liquidity-v4/pool/${poolId}/distribution`, {
       params: { bins },
     }),
 };
@@ -306,6 +424,63 @@ export const revenueApi = {
     api.get<{
       data: RevenueStats;
     }>(`/revenue/stats/${poolAddress}`),
+};
+
+// V4 收益 API
+export const revenueV4Api = {
+  // 手动触发收集指定 V4 池子的每日收益数据
+  collectPoolRevenue: (poolId: string, date?: string) =>
+    api.post(`/revenue-v4/collect/${poolId}`, {}, { params: { date } }),
+
+  // 获取 V4 池子的收益历史数据
+  getPoolRevenueHistory: (
+    poolId: string,
+    startDate?: string,
+    endDate?: string,
+    limit?: number
+  ) =>
+    api.get<{
+      data: PoolDailyRevenue[];
+      total: number;
+      limit: number;
+    }>(`/revenue-v4/history/${poolId}`, {
+      params: { startDate, endDate, limit },
+    }),
+
+  // 获取所有 V4 池子的最新收益数据
+  getAllPoolsLatestRevenue: () =>
+    api.get<{
+      data: PoolDailyRevenue[];
+      total: number;
+    }>('/revenue-v4/latest-all'),
+
+  // 获取多个 V4 池子的收益历史数据（用于前端图表）
+  getRevenueChartData: (
+    poolIds: string[],
+    startDate?: string,
+    endDate?: string,
+    limit?: number
+  ) =>
+    api.get<{
+      data: RevenueChartData[];
+    }>('/revenue-v4/chart-data', {
+      params: {
+        poolIds: poolIds.join(','),
+        startDate,
+        endDate,
+        limit,
+      },
+    }),
+
+  // 手动触发所有 V4 池子的收益数据收集
+  collectAllPoolsRevenue: (date?: string) =>
+    api.post('/revenue-v4/collect-all', {}, { params: { date } }),
+
+  // 获取 V4 收益数据统计信息
+  getRevenueStats: (poolId: string) =>
+    api.get<{
+      data: RevenueStats;
+    }>(`/revenue-v4/stats/${poolId}`),
 };
 
 export default api;
