@@ -11,7 +11,15 @@ import {
   Legend,
   ResponsiveContainer,
 } from "recharts"
-import { revenueApi, poolApi, Pool, RevenueChartData } from "../services/api"
+import {
+  revenueApi,
+  revenueV4Api,
+  poolApi,
+  poolV4Api,
+  Pool,
+  PoolV4,
+  RevenueChartData,
+} from "../services/api"
 
 interface RevenueChartProps {
   className?: string
@@ -46,6 +54,7 @@ const TOKEN_PRICES: { [key: string]: number } = {
 
 export default function RevenueChart({ className }: RevenueChartProps) {
   const [pools, setPools] = useState<Pool[]>([])
+  const [poolsV4, setPoolsV4] = useState<PoolV4[]>([])
   const [revenueData, setRevenueData] = useState<RevenueChartData[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -57,29 +66,48 @@ export default function RevenueChart({ className }: RevenueChartProps) {
   })
   const [hiddenPools, setHiddenPools] = useState<Set<string>>(new Set())
 
-  // 获取池子列表并自动获取收益数据
+  // 获取池子列表并自动获取收益数据（包含 V3 和 V4）
   useEffect(() => {
     const fetchPoolsAndData = async () => {
       try {
-        const response = await poolApi.getAllPools()
+        // 同时获取 V3 和 V4 池子
+        const [v3Response, v4Response] = await Promise.all([
+          poolApi.getAllPools(),
+          poolV4Api.getAllPoolsV4(),
+        ])
+
         let poolsData: Pool[] = []
+        let poolsV4Data: PoolV4[] = []
 
-        // 检查响应格式
-        if (Array.isArray(response)) {
-          poolsData = response
-        } else if ((response as any).success && (response as any).data) {
-          poolsData = (response as any).data
+        // 处理 V3 响应
+        if (Array.isArray(v3Response)) {
+          poolsData = v3Response
+        } else if ((v3Response as any).success && (v3Response as any).data) {
+          poolsData = (v3Response as any).data
         } else if (
-          (response as any).data &&
-          Array.isArray((response as any).data)
+          (v3Response as any).data &&
+          Array.isArray((v3Response as any).data)
         ) {
-          poolsData = (response as any).data
+          poolsData = (v3Response as any).data
         }
 
-        if (poolsData.length > 0) {
-          setPools(poolsData)
-          // 池子数据获取成功，稍后会通过另一个useEffect获取收益数据
+        // 处理 V4 响应
+        if (Array.isArray(v4Response)) {
+          poolsV4Data = v4Response
+        } else if ((v4Response as any).success && (v4Response as any).data) {
+          poolsV4Data = (v4Response as any).data
+        } else if (
+          (v4Response as any).data &&
+          Array.isArray((v4Response as any).data)
+        ) {
+          poolsV4Data = (v4Response as any).data
         }
+
+        setPools(poolsData)
+        setPoolsV4(poolsV4Data)
+        console.log(
+          `获取到 ${poolsData.length} 个 V3 池子和 ${poolsV4Data.length} 个 V4 池子`
+        )
       } catch (error) {
         console.error("获取池子列表失败:", error)
         setError("获取池子列表失败")
@@ -89,39 +117,99 @@ export default function RevenueChart({ className }: RevenueChartProps) {
     fetchPoolsAndData()
   }, [])
 
-  // 获取收益数据
+  // 获取收益数据（包含 V3 和 V4）
   const fetchRevenueData = useCallback(
     async (poolAddresses?: string[]) => {
-      const addressesToFetch =
-        poolAddresses || pools.map((pool) => pool.address)
-      if (addressesToFetch.length === 0) return
+      // 分别获取V3和V4池子的地址/poolId
+      const v3Addresses = poolAddresses || pools.map((pool) => pool.address)
+      const v4PoolIds = poolsV4.map((pool) => pool.poolId)
+
+      if (v3Addresses.length === 0 && v4PoolIds.length === 0) return
 
       setLoading(true)
       setError(null)
 
       try {
-        const response = await revenueApi.getRevenueChartData(
-          addressesToFetch,
-          dateRange.startDate,
-          dateRange.endDate,
-          100
-        )
+        // 🔥 同时获取 V3 和 V4 收益数据
+        const promises = []
 
-        if ((response as any).success && (response as any).data) {
-          // 修复缺失的池子信息
-          const fixedData = (response as any).data.map((item: any) => {
+        // V3 收益数据
+        if (v3Addresses.length > 0) {
+          promises.push(
+            revenueApi.getRevenueChartData(
+              v3Addresses,
+              dateRange.startDate,
+              dateRange.endDate,
+              100
+            )
+          )
+        } else {
+          promises.push(Promise.resolve({ success: true, data: [] }))
+        }
+
+        // V4 收益数据
+        if (v4PoolIds.length > 0) {
+          promises.push(
+            revenueV4Api.getRevenueChartData(
+              v4PoolIds,
+              dateRange.startDate,
+              dateRange.endDate,
+              100
+            )
+          )
+        } else {
+          promises.push(Promise.resolve({ success: true, data: [] }))
+        }
+
+        const [v3Response, v4Response] = await Promise.all(promises)
+
+        let combinedData: any[] = []
+
+        // 处理 V3 数据
+        if ((v3Response as any).success && (v3Response as any).data) {
+          const v3Data = (v3Response as any).data.map((item: any) => {
             if (!item.pool && item.poolAddress) {
-              // 从已加载的池子列表中查找
+              // 从已加载的V3池子列表中查找
               const poolInfo = pools.find((p) => p.address === item.poolAddress)
               if (poolInfo) {
-                return { ...item, pool: poolInfo }
+                return { ...item, pool: { ...poolInfo, version: "V3" } }
               }
             }
-            return item
+            return { ...item, pool: { ...item.pool, version: "V3" } }
           })
-
-          setRevenueData(fixedData)
+          combinedData = [...combinedData, ...v3Data]
         }
+
+        // 处理 V4 数据
+        if ((v4Response as any).success && (v4Response as any).data) {
+          const v4Data = (v4Response as any).data.map((item: any) => {
+            if (!item.pool && item.poolAddress) {
+              // 从已加载的V4池子列表中查找 (poolAddress 实际是 poolId)
+              const poolInfo = poolsV4.find(
+                (p) => p.poolId === item.poolAddress
+              )
+              if (poolInfo) {
+                return {
+                  ...item,
+                  pool: {
+                    ...poolInfo,
+                    address: poolInfo.poolId, // 统一使用 address 字段
+                    version: "V4",
+                  },
+                }
+              }
+            }
+            return { ...item, pool: { ...item.pool, version: "V4" } }
+          })
+          combinedData = [...combinedData, ...v4Data]
+        }
+
+        console.log(
+          `获取收益数据成功: V3=${
+            (v3Response as any).data?.length || 0
+          }个池子, V4=${(v4Response as any).data?.length || 0}个池子`
+        )
+        setRevenueData(combinedData)
       } catch (error) {
         console.error("获取收益数据失败:", error)
         setError("获取收益数据失败")
@@ -129,7 +217,7 @@ export default function RevenueChart({ className }: RevenueChartProps) {
         setLoading(false)
       }
     },
-    [pools, dateRange.startDate, dateRange.endDate]
+    [pools, poolsV4, dateRange.startDate, dateRange.endDate]
   )
 
   useEffect(() => {
@@ -167,7 +255,7 @@ export default function RevenueChart({ className }: RevenueChartProps) {
 
         const poolKey = `${pool.token0Symbol}-${pool.token1Symbol} (${(
           pool.feeTier / 10000
-        ).toFixed(2)}%)`
+        ).toFixed(2)}%) ${pool.version || "V3"}`
 
         // 查找该日期的数据
         const dayData = poolData.data.find((item) => item.date === date)
@@ -325,7 +413,9 @@ export default function RevenueChart({ className }: RevenueChartProps) {
 
                   const poolKey = `${pool.token0Symbol}-${
                     pool.token1Symbol
-                  } (${(pool.feeTier / 10000).toFixed(2)}%)`
+                  } (${(pool.feeTier / 10000).toFixed(2)}%) ${
+                    pool.version || "V3"
+                  }`
                   const isHidden = hiddenPools.has(poolKey)
 
                   return (

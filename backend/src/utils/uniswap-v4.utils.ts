@@ -191,21 +191,21 @@ export class UniswapV4Utils {
     try {
       // 🔥 修复 ETH/USDT 价格计算问题
       // 检查是否是 ETH/USDT 对，需要特殊处理
-      const isETHPair = token0.address === '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2' || 
-                        token1.address === '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2';
-      
+      const isETHPair = token0.address === '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2' ||
+        token1.address === '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2';
+
       if (isETHPair) {
         // 对于 ETH 相关的池子，可能需要交换顺序或取倒数
         try {
           const price1 = tickToPrice(token0, token1, tick);
           const price2 = tickToPrice(token1, token0, tick);
-          
+
           // 选择合理范围内的价格（ETH/USDT 应该在 1000-10000 范围）
           const price1Num = parseFloat(price1.toFixed(8));
           const price2Num = parseFloat(price2.toFixed(8));
-          
+
           console.log(`Debug ETH价格: tick=${tick}, price1=${price1Num}, price2=${price2Num}`);
-          
+
           // 如果 price2 在合理范围内（1000-10000），使用 price2
           if (price2Num > 1000 && price2Num < 10000) {
             return price2.toFixed(8);

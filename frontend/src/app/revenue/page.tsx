@@ -2,21 +2,33 @@
 
 import React, { useState, useEffect } from "react"
 import RevenueChart from "../../components/RevenueChart"
-import { revenueApi, poolApi, Pool, RevenueStats } from "../../services/api"
+import {
+  revenueApi,
+  revenueV4Api,
+  poolApi,
+  poolV4Api,
+  Pool,
+  PoolV4,
+  RevenueStats,
+} from "../../services/api"
 
 export default function RevenuePage() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [syncStatus, setSyncStatus] = useState<string>("")
 
-  // 收集所有池子的最新收益数据
+  // 收集所有池子的最新收益数据（包含 V3 和 V4）
   const handleCollectLatestRevenue = async () => {
     setLoading(true)
     setSyncStatus("正在收集最新收益数据...")
 
     try {
-      revenueApi.collectAllPoolsRevenue()
-      setSyncStatus("所有池子最新收益数据收集中")
+      // 同时收集 V3 和 V4 池子的收益数据
+      await Promise.all([
+        revenueApi.collectAllPoolsRevenue(),
+        revenueV4Api.collectAllPoolsRevenue(),
+      ])
+      setSyncStatus("所有 V3 和 V4 池子最新收益数据收集中")
     } catch (error) {
       console.error("收集收益数据失败:", error)
       setSyncStatus("收集收益数据失败")
@@ -31,7 +43,9 @@ export default function RevenuePage() {
     <div className="container mx-auto px-4 py-8">
       <div className="mb-8">
         <h1 className="text-3xl font-bold mb-2">池子收益分析</h1>
-        <p className="text-gray-600">查看和管理Uniswap V3池子的收益数据</p>
+        <p className="text-gray-600">
+          查看和管理 Uniswap V3 和 V4 池子的收益数据
+        </p>
       </div>
 
       {/* 错误提示 */}
@@ -58,7 +72,7 @@ export default function RevenuePage() {
             disabled={loading}
             className="px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {loading ? "处理中..." : "收集池子收益信息"}
+            {loading ? "处理中..." : "收集 V3 & V4 池子收益信息"}
           </button>
 
           <div className="text-sm text-gray-600">
@@ -75,12 +89,12 @@ export default function RevenuePage() {
         <h2 className="text-xl font-semibold mb-4">使用说明</h2>
         <div className="space-y-3 text-sm text-gray-700">
           <p>
-            <strong>收集池子收益信息:</strong>{" "}
-            获取所有活跃池子最近一个月的收益数据，系统会智能地从最新已有数据继续收集，避免重复处理
+            <strong>收集池子收益信息:</strong> 获取所有活跃的 V3 和 V4
+            池子最近一个月的收益数据，系统会智能地从最新已有数据继续收集，避免重复处理
           </p>
           <p>
-            <strong>图表说明:</strong>{" "}
-            显示所有池子的USDT收益趋势，不同颜色代表不同池子，点击图例可隐藏/显示对应的线条
+            <strong>图表说明:</strong> 显示所有 V3 和 V4 池子的 USDT
+            收益趋势，不同颜色代表不同池子，点击图例可隐藏/显示对应的线条
           </p>
           <p>
             <strong>价格计算:</strong>{" "}

@@ -454,6 +454,10 @@ export const revenueV4Api = {
       total: number;
     }>('/revenue-v4/latest-all'),
 
+  // 批量收集所有 V4 池子的收益数据
+  collectAllPoolsRevenue: (date?: string) =>
+    api.post('/revenue-v4/collect-all', {}, { params: { date } }),
+
   // 获取多个 V4 池子的收益历史数据（用于前端图表）
   getRevenueChartData: (
     poolIds: string[],

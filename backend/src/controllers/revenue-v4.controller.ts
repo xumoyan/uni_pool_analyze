@@ -219,6 +219,128 @@ export class RevenueV4Controller {
   }
 
   /**
+   * 批量收集指定 V4 池子的历史收益数据
+   */
+  @Post("collect-historical/:poolId")
+  async collectPoolV4HistoricalRevenue(
+    @Param("poolId") poolId: string,
+    @Query("days") days?: string,
+  ) {
+    try {
+      const daysNum = days ? parseInt(days) : 30;
+      this.logger.log(`手动收集 V4 池子 ${poolId} 过去 ${daysNum} 天的历史收益数据`);
+
+      const result = await this.poolV4RevenueCollectorService.collectPoolHistoricalRevenue(
+        poolId,
+        daysNum,
+      );
+
+      return {
+        success: true,
+        message: "V4 历史收益数据收集成功",
+        data: result,
+      };
+    } catch (error) {
+      this.logger.error("收集 V4 历史收益数据失败:", error);
+      throw new HttpException(
+        {
+          success: false,
+          message: "收集 V4 历史收益数据失败",
+          error: error.message,
+        },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
+   * 批量收集所有 V4 池子的历史收益数据
+   */
+  @Post("collect-all-historical")
+  async collectAllV4PoolsHistoricalRevenue(@Query("days") days?: string) {
+    try {
+      const daysNum = days ? parseInt(days) : 30;
+      this.logger.log(`手动触发所有 V4 池子过去 ${daysNum} 天的历史收益数据收集`);
+
+      const result = await this.poolV4RevenueCollectorService.collectAllV4PoolsHistoricalRevenue(daysNum);
+
+      return {
+        success: true,
+        message: "所有 V4 池子历史收益数据收集成功",
+        data: result,
+      };
+    } catch (error) {
+      this.logger.error("收集所有 V4 池子历史收益数据失败:", error);
+      throw new HttpException(
+        {
+          success: false,
+          message: "收集所有 V4 池子历史收益数据失败",
+          error: error.message,
+        },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
+   * 🧪 测试 V4 事件查询
+   */
+  @Post("test-events/:poolId")
+  async testV4Events(@Param("poolId") poolId: string) {
+    try {
+      this.logger.log(`测试 V4 池子 ${poolId} 的事件查询`);
+
+      await this.poolV4RevenueCollectorService.testV4EventQuery(poolId);
+
+      return {
+        success: true,
+        message: "V4 事件查询测试完成，请查看日志",
+      };
+    } catch (error) {
+      this.logger.error("V4 事件查询测试失败:", error);
+      throw new HttpException(
+        {
+          success: false,
+          message: "V4 事件查询测试失败",
+          error: error.message,
+        },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
+   * 🧪 测试 V4 收益计算
+   */
+  @Post("test-calculation/:poolId")
+  async testV4RevenueCalculation(
+    @Param("poolId") poolId: string,
+    @Query("date") date?: string,
+  ) {
+    try {
+      this.logger.log(`测试 V4 池子 ${poolId} 的收益计算`);
+
+      const result = await this.poolV4RevenueCollectorService.testV4RevenueCalculation(poolId, date);
+
+      return {
+        success: true,
+        message: "V4 收益计算测试完成",
+        data: result,
+      };
+    } catch (error) {
+      this.logger.error("V4 收益计算测试失败:", error);
+      throw new HttpException(
+        {
+          success: false,
+          message: "V4 收益计算测试失败",
+          error: error.message,
+        },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
    * 获取 V4 收益数据统计信息
    */
   @Get("stats/:poolId")
