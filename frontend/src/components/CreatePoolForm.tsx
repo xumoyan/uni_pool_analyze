@@ -21,10 +21,12 @@ export default function CreatePoolForm({
   onCancel,
 }: CreatePoolFormProps) {
   const [version, setVersion] = useState<"v3" | "v4">("v3")
+  const [chainId, setChainId] = useState<number>(130) // 默认 Unichain
   const [formData, setFormData] = useState<CreatePoolDto>({
     token0Address: "",
     token1Address: "",
     feeTier: 3000,
+    chainId: 130,
   })
   const [v4FormData, setV4FormData] = useState<CreatePoolV4Dto>({
     token0Address: "",
@@ -32,6 +34,7 @@ export default function CreatePoolForm({
     feeTier: 3000,
     tickSpacing: 60,
     hooksAddress: "0x0000000000000000000000000000000000000000",
+    chainId: 130,
   })
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState("")
@@ -90,6 +93,14 @@ export default function CreatePoolForm({
     setError("") // 清除错误信息
   }
 
+  // 处理链切换，同步更新两个表单的 chainId
+  const handleChainChange = (newChainId: number) => {
+    setChainId(newChainId)
+    setFormData((prev) => ({ ...prev, chainId: newChainId }))
+    setV4FormData((prev) => ({ ...prev, chainId: newChainId }))
+    setError("")
+  }
+
   return (
     <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
       <div className="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
@@ -105,6 +116,43 @@ export default function CreatePoolForm({
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-4">
+            {/* 链选择 */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                区块链网络 *
+              </label>
+              <div className="flex space-x-4">
+                <label className="flex items-center">
+                  <input
+                    type="radio"
+                    value="1"
+                    checked={chainId === 1}
+                    onChange={(e) =>
+                      handleChainChange(parseInt(e.target.value))
+                    }
+                    className="mr-2"
+                  />
+                  <span className="text-sm text-gray-700">
+                    Ethereum (Chain ID: 1)
+                  </span>
+                </label>
+                <label className="flex items-center">
+                  <input
+                    type="radio"
+                    value="130"
+                    checked={chainId === 130}
+                    onChange={(e) =>
+                      handleChainChange(parseInt(e.target.value))
+                    }
+                    className="mr-2"
+                  />
+                  <span className="text-sm text-gray-700">
+                    Unichain (Chain ID: 130)
+                  </span>
+                </label>
+              </div>
+            </div>
+
             {/* 版本选择 */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">

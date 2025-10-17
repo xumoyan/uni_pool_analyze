@@ -11,21 +11,27 @@ export interface CreatePoolV4Dto {
   feeTier: number;
   tickSpacing: number;
   hooksAddress?: string;
+  chainId: number; // 新增：指定池子所在的链
 }
 
 @Injectable()
 export class PoolV4ManagerService {
   private readonly logger = new Logger(PoolV4ManagerService.name);
-  private uniswapV4Utils: UniswapV4Utils;
 
   constructor(
     @InjectRepository(PoolV4)
     private poolV4Repository: Repository<PoolV4>,
     private configService: ConfigService,
-  ) {
-    const rpcUrl = this.configService.get<string>("ethereum.rpcUrl");
-    const poolManagerAddress = this.configService.get<string>("ethereum.poolManagerAddress");
-    this.uniswapV4Utils = new UniswapV4Utils(rpcUrl, poolManagerAddress);
+  ) { }
+
+  /**
+   * 根据 chainId 获取 UniswapV4Utils 实例
+   */
+  private getUniswapV4Utils(chainId: number): UniswapV4Utils {
+    const getConfig = this.configService.get<Function>("ethereum.getConfig");
+    const config = getConfig(chainId);
+
+    return new UniswapV4Utils(config.rpcUrl, config.poolManagerAddress);
   }
 
   /**
@@ -33,12 +39,19 @@ export class PoolV4ManagerService {
    */
   async createPoolV4(createPoolDto: CreatePoolV4Dto): Promise<PoolV4> {
     try {
+      const { chainId } = createPoolDto;
+
       this.logger.log(
-        `创建新的 V4 池子: ${createPoolDto.token0Address} - ${createPoolDto.token1Address}, 费率: ${createPoolDto.feeTier}`
+        `创建新的 V4 池子 (Chain ${chainId}): ${createPoolDto.token0Address} - ${createPoolDto.token1Address}, 费率: ${createPoolDto.feeTier}`
       );
 
+      // 根据 chainId 获取工具类
+      const uniswapV4Utils = this.getUniswapV4Utils(chainId);
+      const getConfig = this.configService.get<Function>("ethereum.getConfig");
+      const config = getConfig(chainId);
+
       // 创建 PoolKey
-      const poolKey = this.uniswapV4Utils.createPoolKey(
+      const poolKey = uniswapV4Utils.createPoolKey(
         createPoolDto.token0Address,
         createPoolDto.token1Address,
         createPoolDto.feeTier,
@@ -47,11 +60,11 @@ export class PoolV4ManagerService {
       );
 
       // 计算 PoolId
-      const poolId = this.uniswapV4Utils.calculatePoolId(poolKey);
+      const poolId = uniswapV4Utils.calculatePoolId(poolKey);
 
       // 检查池子是否已存在
       const existingPool = await this.poolV4Repository.findOne({
-        where: { poolId },
+        where: { poolId, chainId },
       });
 
       if (existingPool) {
@@ -61,7 +74,7 @@ export class PoolV4ManagerService {
       // 尝试获取池子信息，如果失败则使用默认值
       let poolInfo;
       try {
-        poolInfo = await this.uniswapV4Utils.getPoolInfo(poolKey);
+        poolInfo = await uniswapV4Utils.getPoolInfo(poolKey);
       } catch (error) {
         this.logger.warn(`无法获取链上池子信息，使用默认值: ${error.message}`);
         poolInfo = {
@@ -80,8 +93,8 @@ export class PoolV4ManagerService {
       let token0Info, token1Info;
       try {
         [token0Info, token1Info] = await Promise.all([
-          this.uniswapV4Utils.getTokenInfo(poolKey.currency0),
-          this.uniswapV4Utils.getTokenInfo(poolKey.currency1),
+          uniswapV4Utils.getTokenInfo(poolKey.currency0),
+          uniswapV4Utils.getTokenInfo(poolKey.currency1),
         ]);
       } catch (error) {
         this.logger.warn(`无法获取代币信息，使用默认值: ${error.message}`);
@@ -103,13 +116,13 @@ export class PoolV4ManagerService {
         feeTier: poolKey.fee,
         tickSpacing: poolKey.tickSpacing,
         hooksAddress: poolKey.hooks,
-        poolManagerAddress: this.configService.get<string>("ethereum.poolManagerAddress"),
+        poolManagerAddress: config.poolManagerAddress,
         currentTick: poolInfo.currentTick,
         currentSqrtPriceX96: poolInfo.currentSqrtPriceX96,
         totalLiquidity: poolInfo.totalLiquidity,
         isActive: true,
         version: "v4",
-        chainId: this.configService.get<number>("ethereum.chainId"),
+        chainId: chainId,
         poolKey: {
           currency0: poolKey.currency0,
           currency1: poolKey.currency1,
@@ -120,7 +133,7 @@ export class PoolV4ManagerService {
       });
 
       const savedPool = await this.poolV4Repository.save(pool);
-      this.logger.log(`V4 池子创建成功: ${poolId}`);
+      this.logger.log(`V4 池子创建成功 (Chain ${chainId}): ${poolId}`);
 
       return savedPool;
     } catch (error) {
@@ -169,6 +182,13 @@ export class PoolV4ManagerService {
         decimals: 18,
         symbol: 'DAI',
         name: 'Dai Stablecoin',
+      },
+      // 🔥 用户添加的代币
+      '0x9151434b16b9763660705744891fa906f660ecc5': {
+        address: address,
+        decimals: 6,
+        symbol: 'USDT', // 根据你的描述，这应该是USDT
+        name: 'Tether USD',
       }
     };
 
@@ -223,10 +243,12 @@ export class PoolV4ManagerService {
     token1Address: string,
     feeTier: number,
     tickSpacing: number,
+    chainId: number,
     hooksAddress?: string
   ): Promise<PoolV4 | null> {
     try {
-      const poolKey = this.uniswapV4Utils.createPoolKey(
+      const uniswapV4Utils = this.getUniswapV4Utils(chainId);
+      const poolKey = uniswapV4Utils.createPoolKey(
         token0Address,
         token1Address,
         feeTier,
@@ -234,10 +256,10 @@ export class PoolV4ManagerService {
         hooksAddress
       );
 
-      const poolId = this.uniswapV4Utils.calculatePoolId(poolKey);
+      const poolId = uniswapV4Utils.calculatePoolId(poolKey);
 
       return this.poolV4Repository.findOne({
-        where: { poolId, isActive: true },
+        where: { poolId, chainId, isActive: true },
       });
     } catch (error) {
       return null;
@@ -284,8 +306,9 @@ export class PoolV4ManagerService {
   /**
    * 根据 PoolKey 计算 PoolId
    */
-  calculatePoolId(poolKey: PoolKey): string {
-    return this.uniswapV4Utils.calculatePoolId(poolKey);
+  calculatePoolId(poolKey: PoolKey, chainId: number): string {
+    const uniswapV4Utils = this.getUniswapV4Utils(chainId);
+    return uniswapV4Utils.calculatePoolId(poolKey);
   }
 
   /**
@@ -296,9 +319,11 @@ export class PoolV4ManagerService {
     token1Address: string,
     feeTier: number,
     tickSpacing: number,
+    chainId: number,
     hooksAddress?: string
   ): PoolKey {
-    return this.uniswapV4Utils.createPoolKey(
+    const uniswapV4Utils = this.getUniswapV4Utils(chainId);
+    return uniswapV4Utils.createPoolKey(
       token0Address,
       token1Address,
       feeTier,

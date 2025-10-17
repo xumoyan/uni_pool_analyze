@@ -246,6 +246,19 @@ export default function UnifiedPoolList({ onRefresh }: UnifiedPoolListProps) {
                       >
                         {pool.version.toUpperCase()}
                       </span>
+                      <span
+                        className={`ml-2 inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                          pool.chainId === 1
+                            ? "bg-blue-100 text-blue-800"
+                            : "bg-indigo-100 text-indigo-800"
+                        }`}
+                      >
+                        {pool.chainId === 1
+                          ? "Ethereum"
+                          : pool.chainId === 130
+                          ? "Unichain"
+                          : `Chain ${pool.chainId}`}
+                      </span>
                       {pool.version === "v4" &&
                         pool.hooksAddress &&
                         pool.hooksAddress !==

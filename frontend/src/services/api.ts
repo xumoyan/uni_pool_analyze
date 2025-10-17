@@ -82,12 +82,14 @@ export interface Pool {
   updatedAt: string;
   totalAmount0: string;
   totalAmount1: string;
+  chainId: number;
 }
 
 export interface CreatePoolDto {
   token0Address: string;
   token1Address: string;
   feeTier: number;
+  chainId: number; // 1 = Ethereum, 130 = Unichain
 }
 
 // V4 池子接口
@@ -128,6 +130,7 @@ export interface CreatePoolV4Dto {
   feeTier: number;
   tickSpacing: number;
   hooksAddress?: string;
+  chainId: number; // 1 = Ethereum, 130 = Unichain
 }
 
 export interface TickLiquidity {

@@ -85,16 +85,18 @@ export class PoolV4Controller {
     feeTier: number;
     tickSpacing: number;
     hooksAddress?: string;
+    chainId: number;
   }) {
     const key = this.poolV4ManagerService.createPoolKey(
       poolKey.token0Address,
       poolKey.token1Address,
       poolKey.feeTier,
       poolKey.tickSpacing,
+      poolKey.chainId,
       poolKey.hooksAddress
     );
 
-    const poolId = this.poolV4ManagerService.calculatePoolId(key);
+    const poolId = this.poolV4ManagerService.calculatePoolId(key, poolKey.chainId);
 
     return {
       poolKey: key,
@@ -111,6 +113,7 @@ export class PoolV4Controller {
     @Query("token1Address") token1Address: string,
     @Query("feeTier") feeTier: string,
     @Query("tickSpacing") tickSpacing: string,
+    @Query("chainId") chainId: string,
     @Query("hooksAddress") hooksAddress?: string,
   ) {
     const pool = await this.poolV4ManagerService.findPoolByTokensAndHooks(
@@ -118,6 +121,7 @@ export class PoolV4Controller {
       token1Address,
       parseInt(feeTier),
       parseInt(tickSpacing),
+      parseInt(chainId),
       hooksAddress
     );
 

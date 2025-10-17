@@ -14,10 +14,7 @@ import { batchFetchTicks } from "../utils/uniswap-v3-liquidity-calculator";
 @Injectable()
 export class LiquidityV4CollectorService {
   private readonly logger = new Logger(LiquidityV4CollectorService.name);
-  private uniswapV4Utils: UniswapV4Utils;
   private liquidityCalculator: UniswapV3LiquidityCalculator;
-
-  private stateViewContract: ethers.Contract;
 
   constructor(
     @InjectRepository(PoolV4)
@@ -26,14 +23,27 @@ export class LiquidityV4CollectorService {
     private tickLiquidityRepository: Repository<TickLiquidity>,
     private configService: ConfigService,
   ) {
-    const rpcUrl = this.configService.get<string>("ethereum.rpcUrl");
-    const poolManagerAddress = this.configService.get<string>("ethereum.poolManagerAddress");
-    this.uniswapV4Utils = new UniswapV4Utils(rpcUrl, poolManagerAddress);
     this.liquidityCalculator = new UniswapV3LiquidityCalculator();
+  }
 
-    // 初始化 StateView 合约
-    const provider = new ethers.providers.JsonRpcProvider(rpcUrl);
-    const stateViewAddress = this.configService.get<string>("ethereum.stateViewAddress");
+  /**
+   * 根据 chainId 获取 UniswapV4Utils 实例
+   */
+  private getUniswapV4Utils(chainId: number): UniswapV4Utils {
+    const getConfig = this.configService.get<Function>("ethereum.getConfig");
+    const config = getConfig(chainId);
+
+    return new UniswapV4Utils(config.rpcUrl, config.poolManagerAddress);
+  }
+
+  /**
+   * 根据 chainId 获取 StateView 合约实例
+   */
+  private getStateViewContract(chainId: number): ethers.Contract {
+    const getConfig = this.configService.get<Function>("ethereum.getConfig");
+    const config = getConfig(chainId);
+
+    const provider = new ethers.providers.JsonRpcProvider(config.rpcUrl);
     const stateViewABI = [
       "function getSlot0(bytes32 poolId) external view returns (uint160 sqrtPriceX96, int24 tick, uint24 protocolFee, uint24 lpFee)",
       "function getLiquidity(bytes32 poolId) external view returns (uint128 liquidity)",
@@ -42,7 +52,28 @@ export class LiquidityV4CollectorService {
       "function getTickInfo(bytes32 poolId, int24 tick) external view returns (uint128 liquidityGross, int128 liquidityNet, uint256 feeGrowthOutside0X128, uint256 feeGrowthOutside1X128)",
       "function getFeeGrowthGlobals(bytes32 poolId) external view returns (uint256 feeGrowthGlobal0, uint256 feeGrowthGlobal1)"
     ];
-    this.stateViewContract = new ethers.Contract(stateViewAddress, stateViewABI, provider);
+
+    return new ethers.Contract(config.stateViewAddress, stateViewABI, provider);
+  }
+
+  /**
+   * 根据 chainId 获取 RPC URL
+   */
+  private getRpcUrl(chainId: number): string {
+    const getConfig = this.configService.get<Function>("ethereum.getConfig");
+    const config = getConfig(chainId);
+
+    return config.rpcUrl;
+  }
+
+  /**
+   * 根据 chainId 获取 Pool Manager 地址
+   */
+  private getPoolManagerAddress(chainId: number): string {
+    const getConfig = this.configService.get<Function>("ethereum.getConfig");
+    const config = getConfig(chainId);
+
+    return config.poolManagerAddress;
   }
 
   /**
@@ -72,12 +103,16 @@ export class LiquidityV4CollectorService {
    */
   async collectPoolData(pool: PoolV4) {
     try {
-      this.logger.log(`开始收集 V4 池子 ${pool.poolId} 的数据`);
+      this.logger.log(`开始收集 V4 池子 ${pool.poolId} (Chain ${pool.chainId}) 的数据`);
+
+      // 根据池子的 chainId 获取工具类和合约
+      const uniswapV4Utils = this.getUniswapV4Utils(pool.chainId);
+      const stateViewContract = this.getStateViewContract(pool.chainId);
 
       // 使用 StateView 直接获取池子状态
       try {
-        const slot0 = await this.stateViewContract.getSlot0(pool.poolId);
-        const liquidity = await this.stateViewContract.getLiquidity(pool.poolId);
+        const slot0 = await stateViewContract.getSlot0(pool.poolId);
+        const liquidity = await stateViewContract.getLiquidity(pool.poolId);
 
         const poolInfo = {
           poolId: pool.poolId,
@@ -94,8 +129,8 @@ export class LiquidityV4CollectorService {
         // 更新池子信息
         await this.updatePoolInfo(pool, poolInfo);
 
-        // 扫描并存储tick数据
-        await this.scanAndStoreV4Ticks(pool, poolInfo);
+        // 扫描并存储tick数据 - 传递工具类实例
+        await this.scanAndStoreV4Ticks(pool, poolInfo, uniswapV4Utils, stateViewContract);
 
       } catch (error) {
         this.logger.warn(`无法获取 V4 池子 ${pool.poolId} 的链上数据，跳过数据收集: ${error.message}`);
@@ -374,11 +409,17 @@ export class LiquidityV4CollectorService {
     const poolManagerAddress = this.configService.get<string>("ethereum.poolManagerAddress");
     const poolManager = new ethers.Contract(poolManagerAddress, abi, provider);
 
-    const batchSize = 100;
+    const batchSize = 500;
     const results: any[] = [];
+
+    const totalBatches = Math.ceil(tickList.length / batchSize);
 
     for (let i = 0; i < tickList.length; i += batchSize) {
       const batch = tickList.slice(i, i + batchSize);
+      const currentBatch = Math.floor(i / batchSize) + 1;
+
+      this.logger.log(`🔥 批量扫描进度: ${currentBatch}/${totalBatches} (${((currentBatch / totalBatches) * 100).toFixed(1)}%), 处理 tick ${i} 到 ${Math.min(i + batchSize - 1, tickList.length - 1)}`);
+
       const promises = batch.map(tick =>
         poolManager.ticks(poolId, tick).catch(() => ({
           liquidityGross: ethers.BigNumber.from(0),
@@ -389,6 +430,8 @@ export class LiquidityV4CollectorService {
 
       const batchResults = await Promise.all(promises);
       results.push(...batchResults);
+
+      this.logger.log(`✅ 批量 ${currentBatch} 完成，获取到 ${batchResults.length} 个结果`);
 
       // 添加延迟避免RPC请求过于频繁
       if (i + batchSize < tickList.length) {
@@ -1261,9 +1304,30 @@ export class LiquidityV4CollectorService {
 
     this.logger.log(`关键 tick 扫描找到 ${foundCount} 个有效 tick，继续全区间扫描...`);
 
+    // 🔥 全区间扫描：从 -887272 到 887272
+    this.logger.log(`🔥 全区间扫描范围: ${startTick} 到 ${endTick}`);
+
+    // 🔥 优化：使用批量扫描替代逐个扫描
+    const tickList: number[] = [];
     for (let tick = startTick; tick <= endTick; tick += tickSpacing) {
-      try {
-        const tickInfo = await this.stateViewContract.getTickInfo(poolId, tick);
+      tickList.push(tick);
+    }
+
+    this.logger.log(`🔥 使用批量扫描，准备扫描 ${tickList.length} 个 tick`);
+
+    // 使用批量获取方法
+    const abi = [
+      "function ticks(bytes32 poolId, int24 tick) external view returns (uint128 liquidityGross, int128 liquidityNet, uint256 feeGrowthOutside0X128, uint256 feeGrowthOutside1X128, int56 tickCumulativeOutside, uint160 secondsPerLiquidityOutsideX128, uint32 secondsOutside, bool initialized)",
+    ];
+    const rpcUrl = this.configService.get<string>("ethereum.rpcUrl");
+
+    try {
+      const batchResults = await this.batchFetchV4Ticks(poolId, tickList, abi, rpcUrl);
+      console.log("batchResults", batchResults.length);
+      // 处理批量结果
+      for (let i = 0; i < tickList.length; i++) {
+        const tick = tickList[i];
+        const tickInfo = batchResults[i];
         scannedCount++;
 
         if (tickInfo.liquidityGross.gt(0)) {
@@ -1275,20 +1339,19 @@ export class LiquidityV4CollectorService {
           });
           foundCount++;
 
-          this.logger.log(`🎯 暴力扫描找到 tick ${tick}: liquidityGross=${tickInfo.liquidityGross.toString()}`);
+          this.logger.log(`🎯 批量扫描找到 tick ${tick}: liquidityGross=${tickInfo.liquidityGross.toString()}`);
         }
 
-        // 每扫描1000个输出进度（全区间扫描数量很大）
+        // 每扫描1000个输出进度
         if (scannedCount % 1000 === 0) {
-          const progress = ((scannedCount / totalTicks) * 100).toFixed(1);
-          this.logger.log(`全区间扫描进度: ${scannedCount}/${totalTicks} (${progress}%), 找到 ${foundCount} 个有效 tick`);
+          const progress = ((scannedCount / tickList.length) * 100).toFixed(1);
+          this.logger.log(`📊 结果处理进度: ${scannedCount}/${tickList.length} (${progress}%), 找到 ${foundCount} 个有效 tick`);
         }
-
-        // 全区间扫描不设置上限，找到所有有流动性的 tick
-
-      } catch (error) {
-        // 忽略单个 tick 查询失败
       }
+
+      this.logger.log(`🎉 批量扫描完成！总共扫描 ${scannedCount} 个 tick，找到 ${foundCount} 个有效 tick`);
+    } catch (error) {
+      this.logger.error(`批量扫描失败: ${error.message}`);
     }
 
     this.logger.log(`暴力扫描完成: 扫描 ${scannedCount} 个 tick，找到 ${foundCount} 个有效`);

@@ -9,23 +9,27 @@ export interface CreatePoolDto {
   token0Address: string;
   token1Address: string;
   feeTier: number;
+  chainId: number; // 新增：指定池子所在的链
 }
 
 @Injectable()
 export class PoolManagerService {
   private readonly logger = new Logger(PoolManagerService.name);
-  private uniswapUtils: UniswapV3Utils;
 
   constructor(
     @InjectRepository(Pool)
     private poolRepository: Repository<Pool>,
     private configService: ConfigService,
-  ) {
-    const rpcUrl = this.configService.get<string>("ethereum.rpcUrl");
-    const factoryAddress = this.configService.get<string>(
-      "ethereum.factoryAddress",
-    );
-    this.uniswapUtils = new UniswapV3Utils(rpcUrl, factoryAddress);
+  ) { }
+
+  /**
+   * 根据 chainId 获取 UniswapV3Utils 实例
+   */
+  private getUniswapUtils(chainId: number): UniswapV3Utils {
+    const getConfig = this.configService.get<Function>("ethereum.getConfig");
+    const config = getConfig(chainId);
+
+    return new UniswapV3Utils(config.rpcUrl, config.factoryAddress);
   }
 
   /**
@@ -33,12 +37,17 @@ export class PoolManagerService {
    */
   async createPool(createPoolDto: CreatePoolDto): Promise<Pool> {
     try {
+      const { chainId } = createPoolDto;
+
       this.logger.log(
-        `创建新池子: ${createPoolDto.token0Address} - ${createPoolDto.token1Address}, 费率: ${createPoolDto.feeTier}`,
+        `创建新池子 (Chain ${chainId}): ${createPoolDto.token0Address} - ${createPoolDto.token1Address}, 费率: ${createPoolDto.feeTier}`,
       );
 
+      // 根据 chainId 获取工具类
+      const uniswapUtils = this.getUniswapUtils(chainId);
+
       // 获取池子地址
-      const poolAddress = await this.uniswapUtils.getPoolAddress(
+      const poolAddress = await uniswapUtils.getPoolAddress(
         createPoolDto.token0Address,
         createPoolDto.token1Address,
         createPoolDto.feeTier,
@@ -46,7 +55,7 @@ export class PoolManagerService {
 
       // 检查池子是否已存在
       const existingPool = await this.poolRepository.findOne({
-        where: { address: poolAddress },
+        where: { address: poolAddress, chainId },
       });
 
       if (existingPool) {
@@ -54,12 +63,12 @@ export class PoolManagerService {
       }
 
       // 获取池子信息
-      const poolInfo = await this.uniswapUtils.getPoolInfo(poolAddress);
+      const poolInfo = await uniswapUtils.getPoolInfo(poolAddress);
 
       // 获取代币信息
       const [token0Info, token1Info] = await Promise.all([
-        this.uniswapUtils.getTokenInfo(createPoolDto.token0Address),
-        this.uniswapUtils.getTokenInfo(createPoolDto.token1Address),
+        uniswapUtils.getTokenInfo(createPoolDto.token0Address),
+        uniswapUtils.getTokenInfo(createPoolDto.token1Address),
       ]);
 
       // 创建池子记录
@@ -77,11 +86,11 @@ export class PoolManagerService {
         currentSqrtPriceX96: poolInfo.currentSqrtPriceX96,
         totalLiquidity: poolInfo.totalLiquidity,
         isActive: true,
-        chainId: this.configService.get<number>("ethereum.chainId"),
+        chainId: chainId,
       });
 
       const savedPool = await this.poolRepository.save(pool);
-      this.logger.log(`池子创建成功: ${poolAddress}`);
+      this.logger.log(`池子创建成功 (Chain ${chainId}): ${poolAddress}`);
 
       return savedPool;
     } catch (error) {
@@ -122,16 +131,18 @@ export class PoolManagerService {
     token0Address: string,
     token1Address: string,
     feeTier: number,
+    chainId: number,
   ): Promise<Pool | null> {
     try {
-      const poolAddress = await this.uniswapUtils.getPoolAddress(
+      const uniswapUtils = this.getUniswapUtils(chainId);
+      const poolAddress = await uniswapUtils.getPoolAddress(
         token0Address,
         token1Address,
         feeTier,
       );
 
       return this.poolRepository.findOne({
-        where: { address: poolAddress, isActive: true },
+        where: { address: poolAddress, chainId, isActive: true },
       });
     } catch (error) {
       return null;

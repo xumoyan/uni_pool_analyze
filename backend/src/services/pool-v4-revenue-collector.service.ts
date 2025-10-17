@@ -12,7 +12,6 @@ import { ConfigService } from "@nestjs/config";
 @Injectable()
 export class PoolV4RevenueCollectorService {
   private readonly logger = new Logger(PoolV4RevenueCollectorService.name);
-  private uniswapV4Utils: UniswapV4Utils;
 
   constructor(
     @InjectRepository(PoolV4)
@@ -20,23 +19,42 @@ export class PoolV4RevenueCollectorService {
     @InjectRepository(PoolDailyRevenue)
     private poolDailyRevenueRepository: Repository<PoolDailyRevenue>,
     private configService: ConfigService,
-  ) {
-    const rpcUrl = this.configService.get<string>("ethereum.rpcUrl");
-    const poolManagerAddress = this.configService.get<string>("ethereum.poolManagerAddress");
-    this.uniswapV4Utils = new UniswapV4Utils(rpcUrl, poolManagerAddress);
+  ) { }
 
-    // 🔥 修复：初始化 StateView 合约用于 V4 数据查询
-    const provider = new ethers.providers.JsonRpcProvider(rpcUrl);
-    const stateViewAddress = this.configService.get<string>("ethereum.stateViewAddress");
+  /**
+   * 根据 chainId 获取 UniswapV4Utils 实例
+   */
+  private getUniswapV4Utils(chainId: number): UniswapV4Utils {
+    const getConfig = this.configService.get<Function>("ethereum.getConfig");
+    const config = getConfig(chainId);
+
+    return new UniswapV4Utils(config.rpcUrl, config.poolManagerAddress);
+  }
+
+  /**
+   * 根据 chainId 获取 StateView 合约实例
+   */
+  private getStateViewContract(chainId: number): ethers.Contract {
+    const getConfig = this.configService.get<Function>("ethereum.getConfig");
+    const config = getConfig(chainId);
+
+    const provider = new ethers.providers.JsonRpcProvider(config.rpcUrl);
     const stateViewABI = [
       "function getSlot0(bytes32 poolId) external view returns (uint160 sqrtPriceX96, int24 tick, uint24 protocolFee, uint24 lpFee)",
       "function getLiquidity(bytes32 poolId) external view returns (uint128 liquidity)",
       "function getFeeGrowthGlobals(bytes32 poolId) external view returns (uint256 feeGrowthGlobal0X128, uint256 feeGrowthGlobal1X128)",
     ];
-    this.stateViewContract = new ethers.Contract(stateViewAddress, stateViewABI, provider);
+
+    return new ethers.Contract(config.stateViewAddress, stateViewABI, provider);
   }
 
-  private stateViewContract: ethers.Contract;
+  /**
+   * 根据 chainId 获取配置
+   */
+  private getChainConfig(chainId: number) {
+    const getConfig = this.configService.get<Function>("ethereum.getConfig");
+    return getConfig(chainId);
+  }
 
   /**
    * 定时收集 V4 每日收益数据 - 使用智能收集策略
@@ -177,19 +195,6 @@ export class PoolV4RevenueCollectorService {
    */
   async collectPoolDailyRevenue(poolId: string, targetDate?: string) {
     try {
-      // 验证 V4 工具类方法是否存在
-      if (!this.uniswapV4Utils.formatTokenAmount) {
-        throw new Error('UniswapV4Utils formatTokenAmount 方法不存在');
-      }
-
-      if (!this.uniswapV4Utils.calculateTickPrice) {
-        throw new Error('UniswapV4Utils calculateTickPrice 方法不存在');
-      }
-
-      if (!this.uniswapV4Utils.calculatePoolId) {
-        throw new Error('UniswapV4Utils calculatePoolId 方法不存在');
-      }
-
       const pool = await this.poolV4Repository.findOne({
         where: { poolId },
       });
@@ -308,7 +313,7 @@ export class PoolV4RevenueCollectorService {
     }
 
     // 获取当日的区块范围
-    const { startBlock, endBlock } = await this.getDayBlockRange(date);
+    const { startBlock, endBlock } = await this.getDayBlockRange(date, pool.chainId);
 
     // 收集该日的收益数据
     const revenueData = await this.calculateV4DailyRevenue(
@@ -334,14 +339,15 @@ export class PoolV4RevenueCollectorService {
     endBlock: number,
     date: string
   ) {
-    const provider = new ethers.providers.JsonRpcProvider(
-      this.configService.get<string>("ethereum.rpcUrl")
-    );
+    const config = this.getChainConfig(pool.chainId);
+    const uniswapV4Utils = this.getUniswapV4Utils(pool.chainId);
+    const stateViewContract = this.getStateViewContract(pool.chainId);
+    const provider = new ethers.providers.JsonRpcProvider(config.rpcUrl);
 
     // 获取区块信息
     const endBlockInfo = await provider.getBlock(endBlock);
 
-    this.logger.log(`计算 V4 池子 ${pool.poolId} 在 ${date} 的收益数据 (区块 ${startBlock} - ${endBlock})`);
+    this.logger.log(`计算 V4 池子 ${pool.poolId} (Chain ${pool.chainId}) 在 ${date} 的收益数据 (区块 ${startBlock} - ${endBlock})`);
 
     // 🔥 修复1: 获取正确的价格信息
     let priceAtStart = "0";
@@ -350,11 +356,11 @@ export class PoolV4RevenueCollectorService {
 
     try {
       // 获取结束时的价格信息
-      const endSlot0 = await this.stateViewContract.getSlot0(pool.poolId);
+      const endSlot0 = await stateViewContract.getSlot0(pool.poolId);
       currentTick = parseInt(endSlot0.tick.toString());
 
       // 🔥 修复2: 正确创建 Token 实例
-      const chainId = this.configService.get<number>("ethereum.chainId");
+      const chainId = pool.chainId;
 
       const token0 = new Token(
         chainId,
@@ -376,7 +382,7 @@ export class PoolV4RevenueCollectorService {
         pool.token1Symbol
       );
 
-      const currentPrice = this.uniswapV4Utils.calculateTickPrice(currentTick, token0, token1);
+      const currentPrice = uniswapV4Utils.calculateTickPrice(currentTick, token0, token1);
       priceAtEnd = currentPrice.toString();
 
       // 暂时使用相同价格（避免历史查询复杂性）
@@ -394,8 +400,8 @@ export class PoolV4RevenueCollectorService {
       ? ((parseFloat(priceAtEnd) - parseFloat(priceAtStart)) / parseFloat(priceAtStart) * 100).toFixed(4)
       : "0";
 
-    // 🔥 混合方案: 使用 getFeeGrowthGlobals 计算精确手续费 + 事件计算交易量
-    const revenueData = await this.calculateDailyRevenueHybrid(pool, startBlock, endBlock, date);
+    // 🔥 混合方案: 使用 getFeeGrowthGlobals 计算精确手续费 + 事件计算交易量 - 传递工具类实例
+    const revenueData = await this.calculateDailyRevenueHybrid(pool, startBlock, endBlock, date, uniswapV4Utils, stateViewContract);
 
     return {
       poolAddress: pool.poolId,
@@ -416,15 +422,17 @@ export class PoolV4RevenueCollectorService {
     pool: PoolV4,
     startBlock: number,
     endBlock: number,
-    date: string
+    date: string,
+    uniswapV4Utils: UniswapV4Utils,
+    stateViewContract: ethers.Contract
   ) {
     try {
       // 🔥 步骤1: 使用 getFeeGrowthGlobals 计算精确的手续费收入
       this.logger.log(`🔍 使用 getFeeGrowthGlobals 计算精确手续费...`);
 
       const [startFeeGrowth, endFeeGrowth] = await Promise.all([
-        this.getFeeGrowthAtBlock(pool.poolId, startBlock),
-        this.getFeeGrowthAtBlock(pool.poolId, endBlock)
+        this.getFeeGrowthAtBlock(pool.poolId, startBlock, stateViewContract),
+        this.getFeeGrowthAtBlock(pool.poolId, endBlock, stateViewContract)
       ]);
 
       this.logger.log(`FeeGrowth 数据获取成功:`);
@@ -455,7 +463,7 @@ export class PoolV4RevenueCollectorService {
       }
 
       // 🔥 步骤2: 获取平均流动性
-      const averageLiquidity = await this.calculateAverageLiquidity(pool.poolId, startBlock, endBlock);
+      const averageLiquidity = await this.calculateAverageLiquidity(pool.poolId, startBlock, endBlock, stateViewContract);
       this.logger.log(`平均流动性: ${averageLiquidity.toString()}`);
 
       // 🔥 步骤3: 计算总手续费收入（使用绝对值，避免负数问题）
@@ -468,10 +476,10 @@ export class PoolV4RevenueCollectorService {
       this.logger.log(`  Token1: ${totalFeeToken1.toString()}`);
 
       // 🔥 步骤4: 获取交易量数据（从事件获取）
-      const volumeData = await this.calculateVolumeFromEvents(pool.poolId, startBlock, endBlock);
+      const volumeData = await this.calculateVolumeFromEvents(pool.poolId, startBlock, endBlock, pool.chainId);
 
       // 🔥 步骤5: 计算 USD 价值
-      const currentSlot0 = await this.stateViewContract.getSlot0(pool.poolId);
+      const currentSlot0 = await stateViewContract.getSlot0(pool.poolId);
       const currentTick = parseInt(currentSlot0.tick.toString());
 
       const feeRevenueUsd = await this.calculateUsdtValue(
@@ -505,14 +513,14 @@ export class PoolV4RevenueCollectorService {
         // 🎯 使用 FeeGrowth 的精确手续费
         feeRevenueToken0: totalFeeToken0.toString(),
         feeRevenueToken1: totalFeeToken1.toString(),
-        feeRevenueToken0Formatted: this.uniswapV4Utils.formatTokenAmount(totalFeeToken0, pool.token0Decimals),
-        feeRevenueToken1Formatted: this.uniswapV4Utils.formatTokenAmount(totalFeeToken1, pool.token1Decimals),
+        feeRevenueToken0Formatted: uniswapV4Utils.formatTokenAmount(totalFeeToken0, pool.token0Decimals),
+        feeRevenueToken1Formatted: uniswapV4Utils.formatTokenAmount(totalFeeToken1, pool.token1Decimals),
 
         // 交易量信息
         volumeToken0: volumeData.volumeToken0.toString(),
         volumeToken1: volumeData.volumeToken1.toString(),
-        volumeToken0Formatted: this.uniswapV4Utils.formatTokenAmount(volumeData.volumeToken0, pool.token0Decimals),
-        volumeToken1Formatted: this.uniswapV4Utils.formatTokenAmount(volumeData.volumeToken1, pool.token1Decimals),
+        volumeToken0Formatted: uniswapV4Utils.formatTokenAmount(volumeData.volumeToken0, pool.token0Decimals),
+        volumeToken1Formatted: uniswapV4Utils.formatTokenAmount(volumeData.volumeToken1, pool.token1Decimals),
 
         // 流动性和USD价值
         liquidityChange: "0",
@@ -530,9 +538,9 @@ export class PoolV4RevenueCollectorService {
   /**
    * 🔥 新增: 获取指定区块的费用增长数据
    */
-  private async getFeeGrowthAtBlock(poolId: string, blockNumber: number) {
+  private async getFeeGrowthAtBlock(poolId: string, blockNumber: number, stateViewContract: ethers.Contract) {
     try {
-      const feeGrowth = await this.stateViewContract.getFeeGrowthGlobals(poolId, {
+      const feeGrowth = await stateViewContract.getFeeGrowthGlobals(poolId, {
         blockTag: blockNumber
       });
 
@@ -558,13 +566,14 @@ export class PoolV4RevenueCollectorService {
   private async calculateAverageLiquidity(
     poolId: string,
     startBlock: number,
-    endBlock: number
+    endBlock: number,
+    stateViewContract: ethers.Contract
   ): Promise<ethers.BigNumber> {
     try {
       // 方法1: 简单取开始和结束的平均值
       const [startLiquidity, endLiquidity] = await Promise.all([
-        this.stateViewContract.getLiquidity(poolId, { blockTag: startBlock }),
-        this.stateViewContract.getLiquidity(poolId, { blockTag: endBlock })
+        stateViewContract.getLiquidity(poolId, { blockTag: startBlock }),
+        stateViewContract.getLiquidity(poolId, { blockTag: endBlock })
       ]);
 
       const averageLiquidity = startLiquidity.add(endLiquidity).div(2);
@@ -580,7 +589,7 @@ export class PoolV4RevenueCollectorService {
       this.logger.warn(`获取平均流动性失败，使用结束时流动性: ${error.message}`);
 
       // 回退方案：使用结束时的流动性
-      return await this.stateViewContract.getLiquidity(poolId, { blockTag: endBlock });
+      return await stateViewContract.getLiquidity(poolId, { blockTag: endBlock });
     }
   }
 
@@ -590,14 +599,15 @@ export class PoolV4RevenueCollectorService {
   private async calculateVolumeFromEvents(
     poolId: string,
     startBlock: number,
-    endBlock: number
+    endBlock: number,
+    chainId: number
   ) {
     let volumeToken0 = ethers.BigNumber.from(0);
     let volumeToken1 = ethers.BigNumber.from(0);
 
     try {
       // 获取 Swap 事件计算交易量
-      const swapEvents = await this.getV4SwapEvents(poolId, startBlock, endBlock);
+      const swapEvents = await this.getV4SwapEvents(poolId, startBlock, endBlock, chainId);
       this.logger.log(`找到 ${swapEvents.length} 个 Swap 事件用于交易量计算`);
 
       for (const event of swapEvents) {
@@ -652,16 +662,16 @@ export class PoolV4RevenueCollectorService {
   /**
    * 🔥 修复: 使用完整的 V4 Swap 事件结构
    */
-  private async getV4SwapEvents(poolId: string, startBlock: number, endBlock: number) {
+  private async getV4SwapEvents(poolId: string, startBlock: number, endBlock: number, chainId: number) {
     try {
-      const poolManagerAddress = this.configService.get<string>("ethereum.poolManagerAddress");
+      const config = this.getChainConfig(chainId);
       const poolManager = new ethers.Contract(
-        poolManagerAddress,
+        config.poolManagerAddress,
         [
           // 🔥 修复：添加缺失的 fee 字段
           "event Swap(bytes32 indexed id, address indexed sender, int128 amount0, int128 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick, uint24 fee)"
         ],
-        new ethers.providers.JsonRpcProvider(this.configService.get<string>("ethereum.rpcUrl"))
+        new ethers.providers.JsonRpcProvider(config.rpcUrl)
       );
 
       const totalBlocks = endBlock - startBlock + 1;
@@ -702,13 +712,13 @@ export class PoolV4RevenueCollectorService {
       // 如果单次查询失败，尝试分批查询
       this.logger.log(`尝试分批查询...`);
       try {
-        const poolManagerAddress = this.configService.get<string>("ethereum.poolManagerAddress");
+        const config = this.getChainConfig(chainId);
         const poolManager = new ethers.Contract(
-          poolManagerAddress,
+          config.poolManagerAddress,
           [
             "event Swap(bytes32 indexed id, address indexed sender, int128 amount0, int128 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick, uint24 fee)"
           ],
-          new ethers.providers.JsonRpcProvider(this.configService.get<string>("ethereum.rpcUrl"))
+          new ethers.providers.JsonRpcProvider(config.rpcUrl)
         );
 
         return await this.querySwapEventsBatched(poolManager, poolId, startBlock, endBlock, 1000);
@@ -752,7 +762,7 @@ export class PoolV4RevenueCollectorService {
 
           allEvents.push(...events);
           this.logger.log(`     ✅ 找到 ${events.length} 个事件`);
-          break; // 成功，跳出重试循环
+          break;
 
         } catch (error) {
           attempt++;
@@ -763,7 +773,6 @@ export class PoolV4RevenueCollectorService {
             break;
           }
 
-          // 重试前等待
           await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
         }
       }
@@ -781,13 +790,15 @@ export class PoolV4RevenueCollectorService {
   /**
    * 获取指定区块的池子信息
    */
-  private async getPoolInfoAtBlock(poolKey: any, blockNumber: number) {
+  private async getPoolInfoAtBlock(poolKey: any, blockNumber: number, chainId: number) {
     try {
       // 🔥 修复：使用 StateView 合约查询历史数据
-      const poolId = this.uniswapV4Utils.calculatePoolId(poolKey);
+      const uniswapV4Utils = this.getUniswapV4Utils(chainId);
+      const stateViewContract = this.getStateViewContract(chainId);
+      const poolId = uniswapV4Utils.calculatePoolId(poolKey);
 
       // 获取指定区块的池子状态
-      const slot0 = await this.stateViewContract.getSlot0(poolId, { blockTag: blockNumber });
+      const slot0 = await stateViewContract.getSlot0(poolId, { blockTag: blockNumber });
 
       return {
         currentTick: parseInt(slot0.tick),
@@ -808,42 +819,119 @@ export class PoolV4RevenueCollectorService {
   }
 
   /**
-   * 获取指定日期的区块范围
+   * 获取指定日期的区块范围（北京时间 UTC+8）
    */
-  private async getDayBlockRange(date: string) {
-    const provider = new ethers.providers.JsonRpcProvider(
-      this.configService.get<string>("ethereum.rpcUrl")
-    );
+  private async getDayBlockRange(date: string, chainId: number) {
+    // 🔥 修复：使用北京时间（UTC+8）
+    // 北京时间 00:00:00 对应 UTC 16:00:00 (前一天)
+    // 北京时间 23:59:59 对应 UTC 15:59:59 (当天)
+    const beijingStartOfDay = new Date(`${date}T00:00:00.000+08:00`);
+    const beijingEndOfDay = new Date(`${date}T23:59:59.999+08:00`);
 
-    const startOfDay = new Date(`${date}T00:00:00.000Z`);
-    const endOfDay = new Date(`${date}T23:59:59.999Z`);
+    // 转换为UTC时间
+    const utcStartOfDay = new Date(beijingStartOfDay.getTime() - 8 * 60 * 60 * 1000);
+    const utcEndOfDay = new Date(beijingEndOfDay.getTime() - 8 * 60 * 60 * 1000);
 
-    const startBlock = await this.getBlockByTimestamp(startOfDay);
-    const endBlock = await this.getBlockByTimestamp(endOfDay);
+    this.logger.log(`🔥 北京时间范围: ${beijingStartOfDay.toISOString()} 到 ${beijingEndOfDay.toISOString()}`);
+    this.logger.log(`🔥 UTC时间范围: ${utcStartOfDay.toISOString()} 到 ${utcEndOfDay.toISOString()}`);
+
+    const startBlock = await this.getBlockByTimestamp(utcStartOfDay, chainId);
+    const endBlock = await this.getBlockByTimestamp(utcEndOfDay, chainId);
+
+    this.logger.log(`🔥 对应区块范围: ${startBlock} 到 ${endBlock} (共 ${endBlock - startBlock + 1} 个区块)`);
 
     return { startBlock, endBlock };
   }
 
   /**
-   * 根据时间戳获取区块号
+   * 根据时间戳获取区块号（支持多链）
    */
-  private async getBlockByTimestamp(timestamp: Date): Promise<number> {
-    const provider = new ethers.providers.JsonRpcProvider(
-      this.configService.get<string>("ethereum.rpcUrl")
-    );
+  private async getBlockByTimestamp(timestamp: Date, chainId: number): Promise<number> {
+    const config = this.getChainConfig(chainId);
+
+    this.logger.log(`🔗 当前链: ${config.chainName}, 区块时间: ${config.blockTime}秒`);
+
+    // 🔥 根据区块时间选择算法
+    // 1-2秒的快速出块链（如 Unichain）：使用直接计算
+    // 10秒以上的慢速出块链（如 Ethereum）：使用二分查找
+    if (config.blockTime <= 2) {
+      return await this.getFastBlockByTimestamp(timestamp, config.blockTime, chainId);
+    } else {
+      return await this.getSlowBlockByTimestamp(timestamp, chainId);
+    }
+  }
+
+  /**
+   * 🔥 快速出块链（1-2秒）：直接计算
+   */
+  private async getFastBlockByTimestamp(timestamp: Date, blockTime: number, chainId: number): Promise<number> {
+    const config = this.getChainConfig(chainId);
+    const provider = new ethers.providers.JsonRpcProvider(config.rpcUrl);
+
+    const targetTimestamp = Math.floor(timestamp.getTime() / 1000);
+
+    // 获取最新区块作为参考点
+    const latestBlock = await provider.getBlock("latest");
+    const latestTimestamp = latestBlock.timestamp;
+    const latestNumber = latestBlock.number;
+
+    // 🔥 快速出块链：直接计算区块高度
+    // 区块高度 = 最新区块高度 - ((最新时间戳 - 目标时间戳) / 区块时间)
+    const timeDiff = latestTimestamp - targetTimestamp;
+    const blockDiff = Math.floor(timeDiff / blockTime);
+    const estimatedBlock = latestNumber - blockDiff;
+
+    this.logger.log(`🔥 快速链区块计算 (${blockTime}秒/块):`);
+    this.logger.log(`  目标时间戳: ${targetTimestamp} (${new Date(targetTimestamp * 1000).toISOString()})`);
+    this.logger.log(`  最新区块: ${latestNumber}, 时间戳: ${latestTimestamp} (${new Date(latestTimestamp * 1000).toISOString()})`);
+    this.logger.log(`  时间差: ${timeDiff} 秒`);
+    this.logger.log(`  区块差: ${blockDiff} 个区块`);
+    this.logger.log(`  估算区块: ${estimatedBlock}`);
+
+    // 验证估算的区块是否合理
+    try {
+      const estimatedBlockInfo = await provider.getBlock(estimatedBlock);
+      const timeDiffCheck = Math.abs(estimatedBlockInfo.timestamp - targetTimestamp);
+
+      if (timeDiffCheck <= blockTime * 2) { // 允许2个区块的误差
+        this.logger.log(`✅ 区块验证成功: ${estimatedBlock}, 时间差: ${timeDiffCheck}秒`);
+        return estimatedBlock;
+      } else {
+        this.logger.log(`⚠️ 区块验证失败，时间差: ${timeDiffCheck}秒，使用估算值`);
+        return estimatedBlock;
+      }
+    } catch (error) {
+      this.logger.warn(`区块验证失败: ${error.message}，使用估算值`);
+      return Math.max(0, estimatedBlock); // 确保不会返回负数
+    }
+  }
+
+  /**
+   * 🔥 慢速出块链（10秒以上）：使用二分查找
+   */
+  private async getSlowBlockByTimestamp(timestamp: Date, chainId: number): Promise<number> {
+    const config = this.getChainConfig(chainId);
+    const provider = new ethers.providers.JsonRpcProvider(config.rpcUrl);
 
     const targetTimestamp = Math.floor(timestamp.getTime() / 1000);
     const latestBlock = await provider.getBlock("latest");
 
+    this.logger.log(`🔍 慢速链区块查找（二分查找）:`);
+    this.logger.log(`  目标时间戳: ${targetTimestamp} (${new Date(targetTimestamp * 1000).toISOString()})`);
+    this.logger.log(`  最新区块: ${latestBlock.number}, 时间戳: ${latestBlock.timestamp}`);
+
     // 二分查找最接近的区块
     let low = 0;
     let high = latestBlock.number;
+    let iterations = 0;
 
     while (low <= high) {
       const mid = Math.floor((low + high) / 2);
       const block = await provider.getBlock(mid);
+      iterations++;
 
       if (block.timestamp === targetTimestamp) {
+        this.logger.log(`✅ 精确匹配区块: ${mid}, 迭代次数: ${iterations}`);
         return mid;
       } else if (block.timestamp < targetTimestamp) {
         low = mid + 1;
@@ -852,6 +940,7 @@ export class PoolV4RevenueCollectorService {
       }
     }
 
+    this.logger.log(`✅ 二分查找完成: ${high}, 迭代次数: ${iterations}`);
     return high; // 返回最接近但不超过目标时间戳的区块
   }
 
@@ -865,11 +954,13 @@ export class PoolV4RevenueCollectorService {
     currentTick: number
   ): Promise<number> {
     try {
-      const amount0 = parseFloat(this.uniswapV4Utils.formatTokenAmount(
+      const uniswapV4Utils = this.getUniswapV4Utils(pool.chainId);
+
+      const amount0 = parseFloat(uniswapV4Utils.formatTokenAmount(
         ethers.BigNumber.from(token0Amount),
         pool.token0Decimals
       ));
-      const amount1 = parseFloat(this.uniswapV4Utils.formatTokenAmount(
+      const amount1 = parseFloat(uniswapV4Utils.formatTokenAmount(
         ethers.BigNumber.from(token1Amount),
         pool.token1Decimals
       ));
@@ -884,7 +975,7 @@ export class PoolV4RevenueCollectorService {
       let usdtValue = 0;
 
       // 创建 Token 实例进行价格计算
-      const chainId = this.configService.get<number>("ethereum.chainId");
+      const chainId = pool.chainId;
 
       const token0 = new Token(
         chainId,
@@ -910,7 +1001,7 @@ export class PoolV4RevenueCollectorService {
       let price = 1;
       try {
         if (currentTick !== 0) {
-          const priceResult = this.uniswapV4Utils.calculateTickPrice(currentTick, token0, token1);
+          const priceResult = uniswapV4Utils.calculateTickPrice(currentTick, token0, token1);
           price = parseFloat(priceResult.toString()) || 1;
         }
       } catch (priceError) {
@@ -989,14 +1080,13 @@ export class PoolV4RevenueCollectorService {
   /**
    * 🧪 测试方法：验证 V4 事件查询
    */
-  async testV4EventQuery(poolId: string) {
+  async testV4EventQuery(poolId: string, chainId: number = 130) {
     this.logger.log(`\n🧪 测试 V4 事件查询:`);
-    this.logger.log(`目标池子: ${poolId}`);
+    this.logger.log(`目标池子: ${poolId}, Chain ID: ${chainId}`);
 
     try {
-      const provider = new ethers.providers.JsonRpcProvider(
-        this.configService.get<string>("ethereum.rpcUrl")
-      );
+      const config = this.getChainConfig(chainId);
+      const provider = new ethers.providers.JsonRpcProvider(config.rpcUrl);
 
       const latestBlock = await provider.getBlockNumber();
       const startBlock = latestBlock - 2000; // 最近2000个区块
@@ -1004,7 +1094,7 @@ export class PoolV4RevenueCollectorService {
       this.logger.log(`测试区块范围: ${startBlock} - ${latestBlock}`);
 
       // 测试事件查询
-      const events = await this.getV4SwapEvents(poolId, startBlock, latestBlock);
+      const events = await this.getV4SwapEvents(poolId, startBlock, latestBlock, chainId);
 
       if (events.length > 0) {
         this.logger.log(`✅ 成功找到 ${events.length} 个事件`);
@@ -1037,13 +1127,13 @@ export class PoolV4RevenueCollectorService {
         // 尝试查询所有池子的事件
         this.logger.log(`尝试查询所有池子的事件...`);
 
-        const poolManagerAddress = this.configService.get<string>("ethereum.poolManagerAddress");
+        const config = this.getChainConfig(chainId);
         const poolManager = new ethers.Contract(
-          poolManagerAddress,
+          config.poolManagerAddress,
           [
             "event Swap(bytes32 indexed id, address indexed sender, int128 amount0, int128 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick, uint24 fee)"
           ],
-          new ethers.providers.JsonRpcProvider(this.configService.get<string>("ethereum.rpcUrl"))
+          new ethers.providers.JsonRpcProvider(config.rpcUrl)
         );
 
         const allFilter = poolManager.filters.Swap();

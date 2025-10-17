@@ -14,7 +14,6 @@ import { batchFetchTicks } from "../utils/uniswap-v3-liquidity-calculator";
 @Injectable()
 export class LiquidityCollectorService {
   private readonly logger = new Logger(LiquidityCollectorService.name);
-  private uniswapUtils: UniswapV3Utils;
   private liquidityCalculator: UniswapV3LiquidityCalculator;
 
   constructor(
@@ -24,12 +23,27 @@ export class LiquidityCollectorService {
     private tickLiquidityRepository: Repository<TickLiquidity>,
     private configService: ConfigService,
   ) {
-    const rpcUrl = this.configService.get<string>("ethereum.rpcUrl");
-    const factoryAddress = this.configService.get<string>(
-      "ethereum.factoryAddress",
-    );
-    this.uniswapUtils = new UniswapV3Utils(rpcUrl, factoryAddress);
     this.liquidityCalculator = new UniswapV3LiquidityCalculator();
+  }
+
+  /**
+   * 根据 chainId 获取 UniswapV3Utils 实例
+   */
+  private getUniswapUtils(chainId: number): UniswapV3Utils {
+    const getConfig = this.configService.get<Function>("ethereum.getConfig");
+    const config = getConfig(chainId);
+
+    return new UniswapV3Utils(config.rpcUrl, config.factoryAddress);
+  }
+
+  /**
+   * 根据 chainId 获取 RPC URL
+   */
+  private getRpcUrl(chainId: number): string {
+    const getConfig = this.configService.get<Function>("ethereum.getConfig");
+    const config = getConfig(chainId);
+
+    return config.rpcUrl;
   }
 
   /**
@@ -59,20 +73,23 @@ export class LiquidityCollectorService {
    */
   async collectPoolData(pool: Pool) {
     try {
-      this.logger.log(`开始收集池子 ${pool.address} 的数据`);
+      this.logger.log(`开始收集池子 ${pool.address} (Chain ${pool.chainId}) 的数据`);
+
+      // 根据池子的 chainId 获取工具类
+      const uniswapUtils = this.getUniswapUtils(pool.chainId);
 
       // 获取池子最新状态
-      const poolInfo = await this.uniswapUtils.getPoolInfo(pool.address);
+      const poolInfo = await uniswapUtils.getPoolInfo(pool.address);
 
       // 更新池子信息
       await this.updatePoolInfo(pool, poolInfo);
 
       // 扫描并存储tick数据，同时计算总代币数量
-      await this.scanAndStoreTicks(pool, poolInfo);
+      await this.scanAndStoreTicks(pool, poolInfo, uniswapUtils);
 
-      this.logger.log(`池子 ${pool.address} 数据收集完成`);
+      this.logger.log(`池子 ${pool.address} (Chain ${pool.chainId}) 数据收集完成`);
     } catch (error) {
-      this.logger.error(`收集池子 ${pool.address} 数据失败:`, error);
+      this.logger.error(`收集池子 ${pool.address} (Chain ${pool.chainId}) 数据失败:`, error);
     }
   }
 
@@ -91,11 +108,10 @@ export class LiquidityCollectorService {
   /**
    * 扫描并存储tick数据，同时计算总代币数量
    */
-  private async scanAndStoreTicks(pool: Pool, poolInfo: any) {
+  private async scanAndStoreTicks(pool: Pool, poolInfo: any, uniswapUtils: UniswapV3Utils) {
     const tickSpacing = poolInfo.tickSpacing;
-    const provider = new ethers.providers.JsonRpcProvider(
-      this.configService.get<string>("ethereum.rpcUrl"),
-    );
+    const rpcUrl = this.getRpcUrl(pool.chainId);
+    const provider = new ethers.providers.JsonRpcProvider(rpcUrl);
     const latestBlock = await provider.getBlock("latest");
 
     const MIN_TICK = -887272;
@@ -119,7 +135,6 @@ export class LiquidityCollectorService {
     const abi = [
       "function ticks(int24) external view returns (uint128 liquidityGross, int128 liquidityNet, uint256 feeGrowthOutside0X128, uint256 feeGrowthOutside1X128, int56 tickCumulativeOutside, uint160 secondsPerLiquidityOutsideX128, uint32 secondsOutside, bool initialized)",
     ];
-    const rpcUrl = this.configService.get<string>("ethereum.rpcUrl");
     const batchResults = await batchFetchTicks(
       pool.address,
       tickList,
@@ -172,20 +187,20 @@ export class LiquidityCollectorService {
 
           // 计算区间价格（用 tickLower）
           const token0 = new Token(
-            this.configService.get<number>("ethereum.chainId"),
+            pool.chainId,
             pool.token0Address,
             pool.token0Decimals,
             pool.token0Symbol,
             pool.token0Symbol
           );
           const token1 = new Token(
-            this.configService.get<number>("ethereum.chainId"),
+            pool.chainId,
             pool.token1Address,
             pool.token1Decimals,
             pool.token1Symbol,
             pool.token1Symbol,
           );
-          const price = this.uniswapUtils.calculateTickPrice(lowerTick, token0, token1);
+          const price = uniswapUtils.calculateTickPrice(lowerTick, token0, token1);
           tickDataArray.push({
             poolAddress: pool.address,
             tick: lowerTick,
@@ -195,8 +210,8 @@ export class LiquidityCollectorService {
             initialized: true,
             token0Amount: amount0.toString(),
             token1Amount: amount1.toString(),
-            token0AmountFormatted: this.uniswapUtils.formatTokenAmount(amount0, pool.token0Decimals),
-            token1AmountFormatted: this.uniswapUtils.formatTokenAmount(amount1, pool.token1Decimals),
+            token0AmountFormatted: uniswapUtils.formatTokenAmount(amount0, pool.token0Decimals),
+            token1AmountFormatted: uniswapUtils.formatTokenAmount(amount1, pool.token1Decimals),
             blockNumber: latestBlock.number,
             blockTimestamp: new Date(latestBlock.timestamp * 1000),
           });
@@ -234,8 +249,8 @@ export class LiquidityCollectorService {
     await this.poolRepository.save(pool);
 
     this.logger.log(`池子 ${pool.address} 总代币数量计算完成:`);
-    this.logger.log(`  Token0: ${this.uniswapUtils.formatTokenAmount(totalAmount0, pool.token0Decimals)}`);
-    this.logger.log(`  Token1: ${this.uniswapUtils.formatTokenAmount(totalAmount1, pool.token1Decimals)}`);
+    this.logger.log(`  Token0: ${uniswapUtils.formatTokenAmount(totalAmount0, pool.token0Decimals)}`);
+    this.logger.log(`  Token1: ${uniswapUtils.formatTokenAmount(totalAmount1, pool.token1Decimals)}`);
     this.logger.log(`  处理的Ticks: ${initializedTicks.length}`);
 
     if (tickDataArray.length > 0) {

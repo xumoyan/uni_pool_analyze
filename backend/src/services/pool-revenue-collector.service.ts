@@ -12,7 +12,6 @@ import { ConfigService } from "@nestjs/config";
 @Injectable()
 export class PoolRevenueCollectorService {
   private readonly logger = new Logger(PoolRevenueCollectorService.name);
-  private uniswapUtils: UniswapV3Utils;
 
   constructor(
     @InjectRepository(Pool)
@@ -20,12 +19,24 @@ export class PoolRevenueCollectorService {
     @InjectRepository(PoolDailyRevenue)
     private poolDailyRevenueRepository: Repository<PoolDailyRevenue>,
     private configService: ConfigService,
-  ) {
-    const rpcUrl = this.configService.get<string>("ethereum.rpcUrl");
-    const factoryAddress = this.configService.get<string>(
-      "ethereum.factoryAddress",
-    );
-    this.uniswapUtils = new UniswapV3Utils(rpcUrl, factoryAddress);
+  ) { }
+
+  /**
+   * 根据 chainId 获取 UniswapV3Utils 实例
+   */
+  private getUniswapUtils(chainId: number): UniswapV3Utils {
+    const getConfig = this.configService.get<Function>("ethereum.getConfig");
+    const config = getConfig(chainId);
+
+    return new UniswapV3Utils(config.rpcUrl, config.factoryAddress);
+  }
+
+  /**
+   * 根据 chainId 获取配置
+   */
+  private getChainConfig(chainId: number) {
+    const getConfig = this.configService.get<Function>("ethereum.getConfig");
+    return getConfig(chainId);
   }
 
   /**
@@ -78,7 +89,7 @@ export class PoolRevenueCollectorService {
       }
 
       // 获取当日的区块范围
-      const { startBlock, endBlock } = await this.getDayBlockRange(date);
+      const { startBlock, endBlock } = await this.getDayBlockRange(date, pool.chainId);
 
       // 收集该日的收益数据
       const revenueData = await this.calculateDailyRevenue(
@@ -140,6 +151,7 @@ export class PoolRevenueCollectorService {
     this.logger.log(`开始收集池子 ${poolAddress} 从 ${startDate.toISOString().split('T')[0]} 到 ${endDate.toISOString().split('T')[0]} 的数据`);
 
     // 检查是否已有该池子的最新数据记录
+
     const existingRecords = await this.poolDailyRevenueRepository.find({
       where: {
         poolAddress
@@ -300,9 +312,9 @@ export class PoolRevenueCollectorService {
     endBlock: number,
     date: string
   ) {
-    const provider = new ethers.providers.JsonRpcProvider(
-      this.configService.get<string>("ethereum.rpcUrl")
-    );
+    const config = this.getChainConfig(pool.chainId);
+    const uniswapUtils = this.getUniswapUtils(pool.chainId);
+    const provider = new ethers.providers.JsonRpcProvider(config.rpcUrl);
 
     // 获取区块信息
     const endBlockInfo = await provider.getBlock(endBlock);
@@ -333,22 +345,22 @@ export class PoolRevenueCollectorService {
       ]);
 
       const token0 = new Token(
-        this.configService.get<number>("ethereum.chainId"),
+        pool.chainId,
         pool.token0Address,
         pool.token0Decimals,
         pool.token0Symbol,
         pool.token0Symbol
       );
       const token1 = new Token(
-        this.configService.get<number>("ethereum.chainId"),
+        pool.chainId,
         pool.token1Address,
         pool.token1Decimals,
         pool.token1Symbol,
         pool.token1Symbol
       );
 
-      priceAtStart = this.uniswapUtils.calculateTickPrice(startSlot0.tick, token0, token1).toString();
-      priceAtEnd = this.uniswapUtils.calculateTickPrice(endSlot0.tick, token0, token1).toString();
+      priceAtStart = uniswapUtils.calculateTickPrice(startSlot0.tick, token0, token1).toString();
+      priceAtEnd = uniswapUtils.calculateTickPrice(endSlot0.tick, token0, token1).toString();
     } catch (error) {
       this.logger.warn(`获取价格信息失败: ${error.message}`);
     }
@@ -437,8 +449,8 @@ export class PoolRevenueCollectorService {
       blockTimestamp: new Date(endBlockInfo.timestamp * 1000),
       feeRevenueToken0: feeRevenueToken0.toString(),
       feeRevenueToken1: feeRevenueToken1.toString(),
-      feeRevenueToken0Formatted: this.uniswapUtils.formatTokenAmount(feeRevenueToken0, pool.token0Decimals),
-      feeRevenueToken1Formatted: this.uniswapUtils.formatTokenAmount(feeRevenueToken1, pool.token1Decimals),
+      feeRevenueToken0Formatted: uniswapUtils.formatTokenAmount(feeRevenueToken0, pool.token0Decimals),
+      feeRevenueToken1Formatted: uniswapUtils.formatTokenAmount(feeRevenueToken1, pool.token1Decimals),
       liquidityChange: "0", // 暂时设为0，后续可以计算
       totalLiquidity,
       priceAtStart,
@@ -446,50 +458,118 @@ export class PoolRevenueCollectorService {
       priceChangePercent,
       volumeToken0: volumeToken0.toString(),
       volumeToken1: volumeToken1.toString(),
-      volumeToken0Formatted: this.uniswapUtils.formatTokenAmount(volumeToken0, pool.token0Decimals),
-      volumeToken1Formatted: this.uniswapUtils.formatTokenAmount(volumeToken1, pool.token1Decimals),
+      volumeToken0Formatted: uniswapUtils.formatTokenAmount(volumeToken0, pool.token0Decimals),
+      volumeToken1Formatted: uniswapUtils.formatTokenAmount(volumeToken1, pool.token1Decimals),
       feeRevenueUsd: feeRevenueUsd.toString(),
       volumeUsd: volumeUsd.toString(),
     };
   }
 
   /**
-   * 获取指定日期的区块范围
+   * 获取指定日期的区块范围（需要池子的 chainId）
    */
-  private async getDayBlockRange(date: string) {
-    const provider = new ethers.providers.JsonRpcProvider(
-      this.configService.get<string>("ethereum.rpcUrl")
-    );
+  private async getDayBlockRange(date: string, chainId: number) {
+    const config = this.getChainConfig(chainId);
+    const provider = new ethers.providers.JsonRpcProvider(config.rpcUrl);
 
     const startOfDay = new Date(`${date}T00:00:00.000Z`);
     const endOfDay = new Date(`${date}T23:59:59.999Z`);
 
-    const startBlock = await this.getBlockByTimestamp(startOfDay);
-    const endBlock = await this.getBlockByTimestamp(endOfDay);
+    const startBlock = await this.getBlockByTimestamp(startOfDay, chainId);
+    const endBlock = await this.getBlockByTimestamp(endOfDay, chainId);
 
     return { startBlock, endBlock };
   }
 
   /**
-   * 根据时间戳获取区块号
+   * 根据时间戳获取区块号（支持多链）
    */
-  private async getBlockByTimestamp(timestamp: Date): Promise<number> {
-    const provider = new ethers.providers.JsonRpcProvider(
-      this.configService.get<string>("ethereum.rpcUrl")
-    );
+  private async getBlockByTimestamp(timestamp: Date, chainId: number): Promise<number> {
+    const config = this.getChainConfig(chainId);
+
+    this.logger.log(`🔗 当前链: ${config.chainName}, 区块时间: ${config.blockTime}秒`);
+
+    // 🔥 根据区块时间选择算法
+    // 1-2秒的快速出块链（如 Unichain）：使用直接计算
+    // 10秒以上的慢速出块链（如 Ethereum）：使用二分查找
+    if (config.blockTime <= 2) {
+      return await this.getFastBlockByTimestamp(timestamp, config.blockTime, chainId);
+    } else {
+      return await this.getSlowBlockByTimestamp(timestamp, chainId);
+    }
+  }
+
+  /**
+   * 🔥 快速出块链（1-2秒）：直接计算
+   */
+  private async getFastBlockByTimestamp(timestamp: Date, blockTime: number, chainId: number): Promise<number> {
+    const config = this.getChainConfig(chainId);
+    const provider = new ethers.providers.JsonRpcProvider(config.rpcUrl);
+
+    const targetTimestamp = Math.floor(timestamp.getTime() / 1000);
+
+    // 获取最新区块作为参考点
+    const latestBlock = await provider.getBlock("latest");
+    const latestTimestamp = latestBlock.timestamp;
+    const latestNumber = latestBlock.number;
+
+    // 🔥 快速出块链：直接计算区块高度
+    // 区块高度 = 最新区块高度 - ((最新时间戳 - 目标时间戳) / 区块时间)
+    const timeDiff = latestTimestamp - targetTimestamp;
+    const blockDiff = Math.floor(timeDiff / blockTime);
+    const estimatedBlock = latestNumber - blockDiff;
+
+    this.logger.log(`🔥 快速链区块计算 (${blockTime}秒/块):`);
+    this.logger.log(`  目标时间戳: ${targetTimestamp} (${new Date(targetTimestamp * 1000).toISOString()})`);
+    this.logger.log(`  最新区块: ${latestNumber}, 时间戳: ${latestTimestamp} (${new Date(latestTimestamp * 1000).toISOString()})`);
+    this.logger.log(`  时间差: ${timeDiff} 秒`);
+    this.logger.log(`  区块差: ${blockDiff} 个区块`);
+    this.logger.log(`  估算区块: ${estimatedBlock}`);
+
+    // 验证估算的区块是否合理
+    try {
+      const estimatedBlockInfo = await provider.getBlock(estimatedBlock);
+      const timeDiffCheck = Math.abs(estimatedBlockInfo.timestamp - targetTimestamp);
+
+      if (timeDiffCheck <= blockTime * 2) { // 允许2个区块的误差
+        this.logger.log(`✅ 区块验证成功: ${estimatedBlock}, 时间差: ${timeDiffCheck}秒`);
+        return estimatedBlock;
+      } else {
+        this.logger.log(`⚠️ 区块验证失败，时间差: ${timeDiffCheck}秒，使用估算值`);
+        return estimatedBlock;
+      }
+    } catch (error) {
+      this.logger.warn(`区块验证失败: ${error.message}，使用估算值`);
+      return Math.max(0, estimatedBlock); // 确保不会返回负数
+    }
+  }
+
+  /**
+   * 🔥 慢速出块链（10秒以上）：使用二分查找
+   */
+  private async getSlowBlockByTimestamp(timestamp: Date, chainId: number): Promise<number> {
+    const config = this.getChainConfig(chainId);
+    const provider = new ethers.providers.JsonRpcProvider(config.rpcUrl);
 
     const targetTimestamp = Math.floor(timestamp.getTime() / 1000);
     const latestBlock = await provider.getBlock("latest");
 
+    this.logger.log(`🔍 慢速链区块查找（二分查找）:`);
+    this.logger.log(`  目标时间戳: ${targetTimestamp} (${new Date(targetTimestamp * 1000).toISOString()})`);
+    this.logger.log(`  最新区块: ${latestBlock.number}, 时间戳: ${latestBlock.timestamp}`);
+
     // 二分查找最接近的区块
     let low = 0;
     let high = latestBlock.number;
+    let iterations = 0;
 
     while (low <= high) {
       const mid = Math.floor((low + high) / 2);
       const block = await provider.getBlock(mid);
+      iterations++;
 
       if (block.timestamp === targetTimestamp) {
+        this.logger.log(`✅ 精确匹配区块: ${mid}, 迭代次数: ${iterations}`);
         return mid;
       } else if (block.timestamp < targetTimestamp) {
         low = mid + 1;
@@ -498,6 +578,7 @@ export class PoolRevenueCollectorService {
       }
     }
 
+    this.logger.log(`✅ 二分查找完成: ${high}, 迭代次数: ${iterations}`);
     return high; // 返回最接近但不超过目标时间戳的区块
   }
 
@@ -510,11 +591,13 @@ export class PoolRevenueCollectorService {
     token1Amount: string,
     currentTick: number
   ): Promise<number> {
-    const amount0 = parseFloat(this.uniswapUtils.formatTokenAmount(
+    const uniswapUtils = this.getUniswapUtils(pool.chainId);
+
+    const amount0 = parseFloat(uniswapUtils.formatTokenAmount(
       ethers.BigNumber.from(token0Amount),
       pool.token0Decimals
     ));
-    const amount1 = parseFloat(this.uniswapUtils.formatTokenAmount(
+    const amount1 = parseFloat(uniswapUtils.formatTokenAmount(
       ethers.BigNumber.from(token1Amount),
       pool.token1Decimals
     ));
@@ -523,14 +606,14 @@ export class PoolRevenueCollectorService {
 
     // 创建Token实例
     const token0 = new Token(
-      this.configService.get<number>("ethereum.chainId"),
+      pool.chainId,
       pool.token0Address,
       pool.token0Decimals,
       pool.token0Symbol,
       pool.token0Symbol
     );
     const token1 = new Token(
-      this.configService.get<number>("ethereum.chainId"),
+      pool.chainId,
       pool.token1Address,
       pool.token1Decimals,
       pool.token1Symbol,
@@ -538,7 +621,7 @@ export class PoolRevenueCollectorService {
     );
 
     // 获取当前tick对应的价格
-    const price = this.uniswapUtils.calculateTickPrice(currentTick, token0, token1);
+    const price = uniswapUtils.calculateTickPrice(currentTick, token0, token1);
 
     // 判断哪个是USDT，然后计算价值
     if (pool.token0Symbol.toUpperCase() === 'USDT') {
