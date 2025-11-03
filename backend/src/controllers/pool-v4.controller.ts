@@ -7,6 +7,8 @@ import {
   Param,
   Body,
   Query,
+  HttpException,
+  HttpStatus,
 } from "@nestjs/common";
 import {
   PoolV4ManagerService,
@@ -41,12 +43,54 @@ export class PoolV4Controller {
 
   @Get(":poolId")
   async getPoolByPoolId(@Param("poolId") poolId: string) {
-    return this.poolV4ManagerService.getPoolByPoolId(poolId);
+    try {
+      return await this.poolV4ManagerService.getPoolByPoolId(poolId);
+    } catch (error) {
+      if (error.message === "Pool not found") {
+        throw new HttpException(
+          {
+            statusCode: HttpStatus.NOT_FOUND,
+            message: `Pool with poolId ${poolId} not found`,
+            error: "Not Found",
+          },
+          HttpStatus.NOT_FOUND
+        );
+      }
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
+          message: error.message || "Internal server error",
+          error: "Internal Server Error",
+        },
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
   }
 
   @Get(":poolId/stats")
   async getPoolStats(@Param("poolId") poolId: string) {
-    return this.poolV4ManagerService.getPoolStats(poolId);
+    try {
+      return await this.poolV4ManagerService.getPoolStats(poolId);
+    } catch (error) {
+      if (error.message === "Pool not found") {
+        throw new HttpException(
+          {
+            statusCode: HttpStatus.NOT_FOUND,
+            message: `Pool with poolId ${poolId} not found`,
+            error: "Not Found",
+          },
+          HttpStatus.NOT_FOUND
+        );
+      }
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
+          message: error.message || "Internal server error",
+          error: "Internal Server Error",
+        },
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
   }
 
   @Put(":poolId/status")
@@ -54,12 +98,55 @@ export class PoolV4Controller {
     @Param("poolId") poolId: string,
     @Body("isActive") isActive: boolean,
   ) {
-    return this.poolV4ManagerService.updatePoolStatus(poolId, isActive);
+    try {
+      return await this.poolV4ManagerService.updatePoolStatus(poolId, isActive);
+    } catch (error) {
+      if (error.message === "Pool not found") {
+        throw new HttpException(
+          {
+            statusCode: HttpStatus.NOT_FOUND,
+            message: `Pool with poolId ${poolId} not found`,
+            error: "Not Found",
+          },
+          HttpStatus.NOT_FOUND
+        );
+      }
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
+          message: error.message || "Internal server error",
+          error: "Internal Server Error",
+        },
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
   }
 
   @Delete(":poolId")
   async deletePool(@Param("poolId") poolId: string) {
-    return this.poolV4ManagerService.deletePool(poolId);
+    try {
+      await this.poolV4ManagerService.deletePool(poolId);
+      return { success: true, message: "Pool deleted successfully" };
+    } catch (error) {
+      if (error.message === "Pool not found") {
+        throw new HttpException(
+          {
+            statusCode: HttpStatus.NOT_FOUND,
+            message: `Pool with poolId ${poolId} not found`,
+            error: "Not Found",
+          },
+          HttpStatus.NOT_FOUND
+        );
+      }
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
+          message: error.message || "Internal server error",
+          error: "Internal Server Error",
+        },
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
   }
 
   @Post(":poolId/collect")

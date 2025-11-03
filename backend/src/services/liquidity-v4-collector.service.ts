@@ -30,8 +30,8 @@ export class LiquidityV4CollectorService {
    * 根据 chainId 获取 UniswapV4Utils 实例
    */
   private getUniswapV4Utils(chainId: number): UniswapV4Utils {
-    const getConfig = this.configService.get<Function>("ethereum.getConfig");
-    const config = getConfig(chainId);
+    const getConfigByVersion = this.configService.get<Function>("ethereum.getConfigByVersion");
+    const config = getConfigByVersion(chainId, "v4");
 
     return new UniswapV4Utils(config.rpcUrl, config.poolManagerAddress);
   }
@@ -40,8 +40,8 @@ export class LiquidityV4CollectorService {
    * 根据 chainId 获取 StateView 合约实例
    */
   private getStateViewContract(chainId: number): ethers.Contract {
-    const getConfig = this.configService.get<Function>("ethereum.getConfig");
-    const config = getConfig(chainId);
+    const getConfigByVersion = this.configService.get<Function>("ethereum.getConfigByVersion");
+    const config = getConfigByVersion(chainId, "v4");
 
     const provider = new ethers.providers.JsonRpcProvider(config.rpcUrl);
     const stateViewABI = [
@@ -57,21 +57,19 @@ export class LiquidityV4CollectorService {
   }
 
   /**
-   * 根据 chainId 获取 RPC URL
+   * 根据 chainId 获取链配置（V4 版本）
    */
-  private getRpcUrl(chainId: number): string {
-    const getConfig = this.configService.get<Function>("ethereum.getConfig");
-    const config = getConfig(chainId);
-
-    return config.rpcUrl;
+  private getChainConfig(chainId: number) {
+    const getConfigByVersion = this.configService.get<Function>("ethereum.getConfigByVersion");
+    return getConfigByVersion(chainId, "v4");
   }
 
   /**
-   * 根据 chainId 获取 Pool Manager 地址
+   * 根据 chainId 获取 Pool Manager 地址（V4 版本）
    */
   private getPoolManagerAddress(chainId: number): string {
-    const getConfig = this.configService.get<Function>("ethereum.getConfig");
-    const config = getConfig(chainId);
+    const getConfigByVersion = this.configService.get<Function>("ethereum.getConfigByVersion");
+    const config = getConfigByVersion(chainId, "v4");
 
     return config.poolManagerAddress;
   }
@@ -99,45 +97,196 @@ export class LiquidityV4CollectorService {
   }
 
   /**
-   * 收集单个 V4 池子的数据（使用 StateView）
+   * 收集单个 V4 池子的数据
+   * 
+   * V4 架构说明：
+   * - 每个 poolId 对应一个独立的池子
+   * - poolId = keccak256(PoolKey)，其中 PoolKey 包含：currency0, currency1, fee, tickSpacing, hooks
+   * - 所有池子共享同一个 PoolManager 合约
+   * - 不同的 poolId = 不同的池子
+   * 
+   * @param pool PoolV4 实体，包含 poolId 和其他信息
    */
   async collectPoolData(pool: PoolV4) {
     try {
-      this.logger.log(`开始收集 V4 池子 ${pool.poolId} (Chain ${pool.chainId}) 的数据`);
+      this.logger.log(`开始收集 V4 池子数据 (PoolId: ${pool.poolId}, Chain: ${pool.chainId})`);
 
-      // 根据池子的 chainId 获取工具类和合约
-      const uniswapV4Utils = this.getUniswapV4Utils(pool.chainId);
-      const stateViewContract = this.getStateViewContract(pool.chainId);
+      // 🔥 使用 StateView 或 PoolManager 读取池子信息
+      // V4 架构说明：
+      // - PoolManager 是所有池子的核心合约，可以直接查询
+      // - StateView 是一个只读视图合约，提供更方便的查询接口（如果部署了的话）
+      // - 优先使用 StateView（如果可用），否则使用 PoolManager
+      const config = this.getChainConfig(pool.chainId);
+      const provider = new ethers.providers.JsonRpcProvider(config.rpcUrl);
 
-      // 使用 StateView 直接获取池子状态
+      // 🔥 优先使用 StateView 合约读取池子信息
+      let useStateView = false;
+      let stateViewContract: ethers.Contract | null = null;
+
+
+
+
+      // 🔥 调试：记录配置信息
+      this.logger.log(`🔍 配置检查 (Chain ${pool.chainId}):`);
+      this.logger.log(`   RPC URL: ${config.rpcUrl}`);
+      this.logger.log(`   StateView 地址: ${config.stateViewAddress || '未配置'}`);
+      this.logger.log(`   PoolManager 地址: ${config.poolManagerAddress || '未配置'}`);
+
+      if (config.stateViewAddress) {
+        try {
+          // 检查 StateView 合约是否存在
+          this.logger.log(`检查 StateView 合约是否存在: ${config.stateViewAddress}`);
+          const stateViewCode = await provider.getCode(config.stateViewAddress);
+          this.logger.log(`StateView 合约代码长度: ${stateViewCode.length} 字符`);
+
+          if (stateViewCode && stateViewCode !== '0x') {
+            stateViewContract = this.getStateViewContract(pool.chainId);
+            useStateView = true;
+            this.logger.log(`✅ 使用 StateView 合约读取池子信息 (地址: ${config.stateViewAddress}, Chain: ${pool.chainId})`);
+          } else {
+            this.logger.warn(`⚠️  StateView 合约未部署 (地址: ${config.stateViewAddress}, Chain: ${pool.chainId})，将使用 PoolManager`);
+          }
+        } catch (error) {
+          this.logger.warn(`检查 StateView 合约时出错: ${error.message}，将使用 PoolManager`);
+        }
+      } else {
+        this.logger.warn(`⚠️  StateView 地址未配置 (Chain: ${pool.chainId})，将使用 PoolManager`);
+      }
+
+      // 🔥 如果 StateView 不可用，使用 PoolManager
+      let poolManagerAddress: string;
+      let poolManager: ethers.Contract | null = null;
+
+      if (!useStateView) {
+        // 优先使用数据库中存储的 poolManagerAddress
+        poolManagerAddress = pool.poolManagerAddress || config.poolManagerAddress;
+
+        if (!poolManagerAddress) {
+          throw new Error(`PoolManager 地址未配置 (Chain ${pool.chainId})`);
+        }
+
+        this.logger.log(`使用 PoolManager 地址: ${poolManagerAddress} (来源: ${pool.poolManagerAddress ? '数据库' : '配置'})`);
+
+        // 创建 PoolManager 合约实例
+        const poolManagerABI = [
+          "function getSlot0(bytes32 id) external view returns (uint160 sqrtPriceX96, int24 tick, uint8 protocolFee, uint24 lpFee)",
+          "function getLiquidity(bytes32 id) external view returns (uint128 liquidity)",
+        ];
+        poolManager = new ethers.Contract(
+          poolManagerAddress,
+          poolManagerABI,
+          provider
+        );
+      }
+
+      this.logger.log(`查询的 PoolId: ${pool.poolId}`);
+      this.logger.log(`RPC URL: ${config.rpcUrl}`);
+
+      // 🔥 使用 StateView 或 PoolManager 获取池子状态
       try {
-        const slot0 = await stateViewContract.getSlot0(pool.poolId);
-        const liquidity = await stateViewContract.getLiquidity(pool.poolId);
+        // 🔥 检查这个 poolId 对应的池子是否已在链上初始化
+        const contractToCheck = useStateView ? stateViewContract : poolManager;
+        const addressToCheck = useStateView ? config.stateViewAddress : poolManagerAddress;
+
+        const isPoolInitialized = await this.checkPoolInitializedOnChain(
+          pool.poolId,
+          addressToCheck,
+          provider,
+          useStateView ? stateViewContract : null
+        );
+
+        if (!isPoolInitialized) {
+          this.logger.warn(`⚠️  PoolId ${pool.poolId} 对应的池子未在链上初始化`);
+          this.logger.warn(`   池子可能在数据库中，但链上尚未创建或初始化`);
+          return {
+            success: false,
+            message: `PoolId ${pool.poolId} 对应的池子未在链上初始化`,
+            poolId: pool.poolId,
+          };
+        }
+
+        // 🔥 尝试调用 getSlot0 获取池子状态
+        // 注意：如果池子未初始化，getSlot0 会 revert
+        let slot0, liquidity;
+        try {
+          if (useStateView && stateViewContract) {
+            // 使用 StateView 查询
+            slot0 = await stateViewContract.getSlot0(pool.poolId);
+            liquidity = await stateViewContract.getLiquidity(pool.poolId);
+          } else if (poolManager) {
+            // 使用 PoolManager 查询
+            slot0 = await poolManager.getSlot0(pool.poolId);
+            liquidity = await poolManager.getLiquidity(pool.poolId);
+          } else {
+            throw new Error("没有可用的合约实例");
+          }
+        } catch (slot0Error) {
+          // 如果 getSlot0 失败，可能是池子未初始化或其他问题
+          if (slot0Error.code === 'CALL_EXCEPTION' || slot0Error.message.includes('revert')) {
+            this.logger.warn(`⚠️  getSlot0 调用失败，PoolId ${pool.poolId} 对应的池子可能未初始化`);
+            this.logger.warn(`   错误信息: ${slot0Error.message}`);
+
+            // 再次通过事件验证池子是否存在
+            const addressForEvents = poolManagerAddress || config.poolManagerAddress;
+            const poolExistsFromEvents = await this.checkPoolFromEvents(pool.poolId, addressForEvents, provider);
+            if (!poolExistsFromEvents) {
+              return {
+                success: false,
+                message: `PoolId ${pool.poolId} 对应的池子未在链上初始化（通过事件验证）`,
+                poolId: pool.poolId,
+              };
+            }
+
+            // 如果事件显示池子存在但 getSlot0 失败，可能是其他问题
+            this.logger.error(`❌ 事件显示池子存在，但 getSlot0 调用失败，可能是合约或网络问题`);
+            this.logger.error(`   PoolId: ${pool.poolId}`);
+            this.logger.error(`   使用的合约: ${useStateView ? 'StateView' : 'PoolManager'}`);
+            this.logger.error(`   合约地址: ${useStateView ? config.stateViewAddress : poolManagerAddress}`);
+            this.logger.error(`   RPC URL: ${config.rpcUrl}`);
+            throw slot0Error;
+          }
+          throw slot0Error;
+        }
 
         const poolInfo = {
           poolId: pool.poolId,
-          currentTick: parseInt(slot0.tick),
+          currentTick: typeof slot0.tick === 'number' ? slot0.tick : slot0.tick.toNumber(),
           currentSqrtPriceX96: slot0.sqrtPriceX96.toString(),
           totalLiquidity: liquidity.toString(),
-          protocolFee: slot0.protocolFee,
-          lpFee: slot0.lpFee,
+          protocolFee: typeof slot0.protocolFee === 'number' ? slot0.protocolFee : slot0.protocolFee,
+          lpFee: typeof slot0.lpFee === 'number' ? slot0.lpFee : slot0.lpFee,
           tickSpacing: pool.tickSpacing
         };
 
-        this.logger.log(`成功获取 V4 池子 ${pool.poolId} 的链上信息: tick=${poolInfo.currentTick}, liquidity=${poolInfo.totalLiquidity}`);
+        this.logger.log(`✅ 成功获取 V4 池子 ${pool.poolId} 的链上信息:`);
+        this.logger.log(`  Tick: ${poolInfo.currentTick}`);
+        this.logger.log(`  Liquidity: ${poolInfo.totalLiquidity}`);
+        this.logger.log(`  ProtocolFee: ${poolInfo.protocolFee}, LpFee: ${poolInfo.lpFee}`);
 
         // 更新池子信息
         await this.updatePoolInfo(pool, poolInfo);
 
-        // 扫描并存储tick数据 - 传递工具类实例
-        await this.scanAndStoreV4Ticks(pool, poolInfo, uniswapV4Utils, stateViewContract);
+        // 扫描并存储tick数据
+        await this.scanAndStoreV4Ticks(pool, poolInfo);
 
       } catch (error) {
-        this.logger.warn(`无法获取 V4 池子 ${pool.poolId} 的链上数据，跳过数据收集: ${error.message}`);
+        this.logger.error(`❌ 无法获取 V4 池子 ${pool.poolId} 的链上数据:`);
+        this.logger.error(`  错误: ${error.message}`);
+        this.logger.error(`  使用的合约: ${useStateView ? 'StateView' : 'PoolManager'}`);
+        if (useStateView) {
+          this.logger.error(`  StateView 地址: ${config.stateViewAddress}`);
+        } else {
+          this.logger.error(`  PoolManager 地址: ${poolManagerAddress || config.poolManagerAddress}`);
+          this.logger.error(`  数据库中的 PoolManager 地址: ${pool.poolManagerAddress || '未设置'}`);
+          this.logger.error(`  配置中的 PoolManager 地址: ${config.poolManagerAddress || '未设置'}`);
+        }
+        this.logger.error(`  RPC URL: ${config.rpcUrl}`);
+        this.logger.error(`  ChainId: ${pool.chainId}`);
+
         // 不抛出错误，允许其他池子继续处理
         return {
           success: false,
-          message: "V4 StateView 数据获取失败，可能是合约未部署或网络问题",
+          message: `V4 PoolManager 数据获取失败: ${error.message}`,
           poolId: pool.poolId,
         };
       }
@@ -169,7 +318,9 @@ export class LiquidityV4CollectorService {
    * 使用 StateView 查找活跃的 ticks
    * 全区间扫描方式
    */
-  private async findActiveTicks(poolId: string, currentTick: number): Promise<number[]> {
+  private async findActiveTicks(poolId: string, currentTick: number, chainId: number): Promise<number[]> {
+    // 🔥 修复：根据 chainId 获取 StateView 合约
+    const stateViewContract = this.getStateViewContract(chainId);
     const activeTicks: number[] = [];
 
     try {
@@ -186,7 +337,7 @@ export class LiquidityV4CollectorService {
       for (let word = MIN_WORD; word <= MAX_WORD; word += 20) { // 每20个word扫描一次，快速定位活跃区域
 
         try {
-          const bitmap = await this.stateViewContract.getTickBitmap(poolId, word);
+          const bitmap = await stateViewContract.getTickBitmap(poolId, word);
           scannedWords++;
 
           if (bitmap.gt(0)) {
@@ -196,7 +347,7 @@ export class LiquidityV4CollectorService {
             // 在这个活跃区域附近进行细致扫描
             for (let nearWord = word - 2; nearWord <= word + 2; nearWord++) {
               try {
-                const nearBitmap = await this.stateViewContract.getTickBitmap(poolId, nearWord);
+                const nearBitmap = await stateViewContract.getTickBitmap(poolId, nearWord);
 
                 if (nearBitmap.gt(0)) {
                   this.logger.log(`解析活跃 bitmap Word ${nearWord}: ${nearBitmap.toString(16)}`);
@@ -259,36 +410,34 @@ export class LiquidityV4CollectorService {
   }
 
   /**
-   * 使用 StateView 扫描并存储 V4 tick数据
-   * 基于 tickBitmap 的高效扫描方式
+   * 🔥 修复：扫描并存储 V4 tick数据
+   * 主要使用事件查找有流动性的 tick，不再依赖 StateView
    */
   private async scanAndStoreV4Ticks(pool: PoolV4, poolInfo: any) {
-    const provider = new ethers.providers.JsonRpcProvider(
-      this.configService.get<string>("ethereum.rpcUrl"),
-    );
+    const config = this.getChainConfig(pool.chainId);
+    const provider = new ethers.providers.JsonRpcProvider(config.rpcUrl);
     const latestBlock = await provider.getBlock("latest");
 
-    this.logger.log(`使用 StateView 扫描 V4 池子 ${pool.poolId} 的 tick 数据`);
+    this.logger.log(`扫描 V4 池子 ${pool.poolId} 的 tick 数据 (Chain: ${pool.chainId})`);
 
     try {
-      // 1. 获取当前池子状态
-      const slot0 = await this.stateViewContract.getSlot0(pool.poolId);
-      const currentTick = parseInt(slot0.tick);
-      const totalLiquidity = await this.stateViewContract.getLiquidity(pool.poolId);
+      // 🔥 使用传入的 poolInfo，不再重新查询
+      const currentTick = poolInfo.currentTick;
+      const totalLiquidity = ethers.BigNumber.from(poolInfo.totalLiquidity);
 
       this.logger.log(`当前 tick: ${currentTick}, 总流动性: ${totalLiquidity.toString()}`);
 
-      // 更新池子状态
+      // 更新池子状态（已经更新过了，这里只是确保）
       pool.currentTick = currentTick;
-      pool.currentSqrtPriceX96 = slot0.sqrtPriceX96.toString();
-      pool.totalLiquidity = totalLiquidity.toString();
+      pool.currentSqrtPriceX96 = poolInfo.currentSqrtPriceX96;
+      pool.totalLiquidity = poolInfo.totalLiquidity;
 
       // 如果是空池子，直接返回
       if (totalLiquidity.eq(0)) {
         this.logger.log(`空池子，无需计算流动性分布`);
 
         pool.currentTick = currentTick;
-        pool.currentSqrtPriceX96 = slot0.sqrtPriceX96.toString();
+        pool.currentSqrtPriceX96 = poolInfo.currentSqrtPriceX96;
         pool.totalLiquidity = "0";
         pool.totalAmount0 = "0";
         pool.totalAmount1 = "0";
@@ -303,7 +452,8 @@ export class LiquidityV4CollectorService {
       if (existingTickData.length > 0) {
         this.logger.log(`从数据库获取到 ${existingTickData.length} 条块高 23388479 的 tick 数据，重新计算价格和代币数量`);
 
-        const recalculatedData = await this.recalculateV4TickData(existingTickData, pool, currentTick, slot0.sqrtPriceX96);
+        const currentSqrtPriceX96 = ethers.BigNumber.from(poolInfo.currentSqrtPriceX96);
+        const recalculatedData = await this.recalculateV4TickData(existingTickData, pool, currentTick, currentSqrtPriceX96);
 
         if (recalculatedData.length > 0) {
           // 更新数据库中的价格和代币数量
@@ -320,7 +470,7 @@ export class LiquidityV4CollectorService {
 
           // 更新池子信息
           pool.currentTick = currentTick;
-          pool.currentSqrtPriceX96 = slot0.sqrtPriceX96.toString();
+          pool.currentSqrtPriceX96 = poolInfo.currentSqrtPriceX96;
           pool.totalLiquidity = totalLiquidity.toString();
           pool.totalAmount0 = totalAmount0.toString();
           pool.totalAmount1 = totalAmount1.toString();
@@ -328,8 +478,9 @@ export class LiquidityV4CollectorService {
           await this.poolV4Repository.save(pool);
 
           this.logger.log(`V4 池子 ${pool.poolId} 价格和代币数量重新计算完成:`);
-          this.logger.log(`  Token0: ${this.uniswapV4Utils.formatTokenAmount(totalAmount0, pool.token0Decimals)}`);
-          this.logger.log(`  Token1: ${this.uniswapV4Utils.formatTokenAmount(totalAmount1, pool.token1Decimals)}`);
+          const uniswapV4Utils = this.getUniswapV4Utils(pool.chainId);
+          this.logger.log(`  Token0: ${uniswapV4Utils.formatTokenAmount(totalAmount0, pool.token0Decimals)}`);
+          this.logger.log(`  Token1: ${uniswapV4Utils.formatTokenAmount(totalAmount1, pool.token1Decimals)}`);
           this.logger.log(`  重新计算的Ticks: ${recalculatedData.length}`);
 
           return;
@@ -339,8 +490,28 @@ export class LiquidityV4CollectorService {
       // 如果没有已有数据，继续原有的扫描流程
       this.logger.log(`未找到块高 23388479 的已有数据，继续扫描流程`);
 
+      // 🔥 优先使用 StateView 的方法获取流动性分布（使用 getTickBitmap + getTickLiquidity）
       let initializedTicks: any[] = [];
-      initializedTicks = await this.findTicksFromEvents(pool.poolId, pool.tickSpacing);
+
+      // 步骤1: 尝试使用 StateView 的 getTickBitmap 查找活跃 tick
+      const config = this.getChainConfig(pool.chainId);
+      if (config.stateViewAddress) {
+        try {
+          this.logger.log(`尝试使用 StateView 获取流动性分布...`);
+          initializedTicks = await this.findTicksFromStateView(pool.poolId, pool.tickSpacing, pool.chainId);
+          if (initializedTicks.length > 0) {
+            this.logger.log(`✅ 通过 StateView 找到 ${initializedTicks.length} 个有流动性的 tick`);
+          }
+        } catch (error) {
+          this.logger.warn(`StateView 查询失败，回退到事件查询: ${error.message}`);
+        }
+      }
+
+      // 步骤2: 如果 StateView 查询失败或未配置，回退到事件查询
+      if (initializedTicks.length === 0) {
+        this.logger.log(`回退到事件查询方式...`);
+        initializedTicks = await this.findTicksFromEvents(pool.poolId, pool.tickSpacing, pool.chainId);
+      }
 
       if (initializedTicks.length === 0) {
         this.logger.warn(`未找到任何有流动性的 tick`);
@@ -350,10 +521,11 @@ export class LiquidityV4CollectorService {
       this.logger.log(`找到 ${initializedTicks.length} 个有流动性的 tick`);
 
       // 🔥 使用修复后的流动性分布计算
+      const currentSqrtPriceX96 = ethers.BigNumber.from(poolInfo.currentSqrtPriceX96);
       const liquidityDistribution = await this.calculateV4LiquidityDistribution(
         initializedTicks,
         currentTick,
-        slot0.sqrtPriceX96,
+        currentSqrtPriceX96,
         pool
       );
 
@@ -370,7 +542,7 @@ export class LiquidityV4CollectorService {
 
       // 更新池子信息
       pool.currentTick = currentTick;
-      pool.currentSqrtPriceX96 = slot0.sqrtPriceX96.toString();
+      pool.currentSqrtPriceX96 = poolInfo.currentSqrtPriceX96;
       pool.totalLiquidity = totalLiquidity.toString();
       pool.totalAmount0 = totalAmount0.toString();
       pool.totalAmount1 = totalAmount1.toString();
@@ -384,8 +556,9 @@ export class LiquidityV4CollectorService {
       }
 
       this.logger.log(`V4 池子 ${pool.poolId} 总代币数量计算完成:`);
-      this.logger.log(`  Token0: ${this.uniswapV4Utils.formatTokenAmount(totalAmount0, pool.token0Decimals)}`);
-      this.logger.log(`  Token1: ${this.uniswapV4Utils.formatTokenAmount(totalAmount1, pool.token1Decimals)}`);
+      const uniswapV4Utils = this.getUniswapV4Utils(pool.chainId);
+      this.logger.log(`  Token0: ${uniswapV4Utils.formatTokenAmount(totalAmount0, pool.token0Decimals)}`);
+      this.logger.log(`  Token1: ${uniswapV4Utils.formatTokenAmount(totalAmount1, pool.token1Decimals)}`);
       this.logger.log(`  处理的Ticks: ${initializedTicks.length}`);
 
 
@@ -403,10 +576,19 @@ export class LiquidityV4CollectorService {
     poolId: string,
     tickList: number[],
     abi: string[],
-    rpcUrl: string
+    rpcUrl: string,
+    chainId: number
   ): Promise<any[]> {
     const provider = new ethers.providers.JsonRpcProvider(rpcUrl);
-    const poolManagerAddress = this.configService.get<string>("ethereum.poolManagerAddress");
+    // 🔥 修复：根据 chainId 和版本获取正确的 PoolManager 地址
+    const getConfigByVersion = this.configService.get<Function>("ethereum.getConfigByVersion");
+    const config = getConfigByVersion(chainId, "v4");
+    const poolManagerAddress = config.poolManagerAddress;
+
+    if (!poolManagerAddress) {
+      throw new Error(`PoolManager 地址未配置 (Chain ${chainId}, Version: v4)`);
+    }
+
     const poolManager = new ethers.Contract(poolManagerAddress, abi, provider);
 
     const batchSize = 500;
@@ -513,12 +695,16 @@ export class LiquidityV4CollectorService {
    * 全面诊断 V4 流动性问题
    */
   private async comprehensiveDiagnosis(pool: PoolV4) {
+    // 🔥 修复：使用 pool.chainId 获取 StateView 合约
+    const stateViewContract = this.getStateViewContract(pool.chainId);
+
     this.logger.log(`\n🔬 开始全面诊断 V4 池子问题:`);
     this.logger.log(`   Pool ID: ${pool.poolId}`);
-    this.logger.log(`   StateView 地址: ${this.stateViewContract.address}`);
+    this.logger.log(`   Chain ID: ${pool.chainId}`);
+    this.logger.log(`   StateView 地址: ${stateViewContract.address}`);
 
     // 第一步：验证合约和网络
-    await this.verifyContractAndNetwork();
+    await this.verifyContractAndNetwork(pool.chainId);
 
     // 第二步：验证池子基础数据
     await this.verifyPoolBasicData(pool);
@@ -536,12 +722,15 @@ export class LiquidityV4CollectorService {
   /**
    * 验证合约和网络连接
    */
-  private async verifyContractAndNetwork() {
+  private async verifyContractAndNetwork(chainId: number) {
+    // 🔥 修复：使用 chainId 获取 StateView 合约
+    const stateViewContract = this.getStateViewContract(chainId);
+
     this.logger.log(`\n1️⃣ 验证合约和网络连接:`);
 
     try {
       // 检查合约代码
-      const code = await this.stateViewContract.provider.getCode(this.stateViewContract.address);
+      const code = await stateViewContract.provider.getCode(stateViewContract.address);
       this.logger.log(`   合约代码长度: ${code.length} 字符`);
 
       if (code === '0x' || code.length < 100) {
@@ -550,19 +739,19 @@ export class LiquidityV4CollectorService {
       }
 
       // 检查网络
-      const network = await this.stateViewContract.provider.getNetwork();
+      const network = await stateViewContract.provider.getNetwork();
       this.logger.log(`   网络 ID: ${network.chainId}`);
       this.logger.log(`   网络名称: ${network.name}`);
 
       // 检查最新区块
-      const latestBlock = await this.stateViewContract.provider.getBlock('latest');
+      const latestBlock = await stateViewContract.provider.getBlock('latest');
       this.logger.log(`   最新区块: ${latestBlock.number}`);
       this.logger.log(`   区块时间: ${new Date(latestBlock.timestamp * 1000).toISOString()}`);
 
       // 测试基础方法调用
       try {
-        const testCall = await this.stateViewContract.provider.call({
-          to: this.stateViewContract.address,
+        const testCall = await stateViewContract.provider.call({
+          to: stateViewContract.address,
           data: "0x" // 简单的调用测试
         });
         this.logger.log(`   ✅ StateView 合约可以正常调用`);
@@ -583,12 +772,15 @@ export class LiquidityV4CollectorService {
    * 验证池子基础数据
    */
   private async verifyPoolBasicData(pool: PoolV4) {
+    // 🔥 修复：使用 pool.chainId 获取 StateView 合约
+    const stateViewContract = this.getStateViewContract(pool.chainId);
+
     this.logger.log(`\n2️⃣ 验证池子基础数据:`);
 
     try {
       // 获取基础状态
-      const slot0 = await this.stateViewContract.getSlot0(pool.poolId);
-      const liquidity = await this.stateViewContract.getLiquidity(pool.poolId);
+      const slot0 = await stateViewContract.getSlot0(pool.poolId);
+      const liquidity = await stateViewContract.getLiquidity(pool.poolId);
 
       this.logger.log(`   ✅ getSlot0 成功:`);
       this.logger.log(`     sqrtPriceX96: ${slot0.sqrtPriceX96.toString()}`);
@@ -626,6 +818,8 @@ export class LiquidityV4CollectorService {
    * 测试不同的查询方法
    */
   private async testDifferentQueryMethods(pool: PoolV4) {
+    // 🔥 修复：使用 pool.chainId 获取 StateView 合约
+    const stateViewContract = this.getStateViewContract(pool.chainId);
     this.logger.log(`\n3️⃣ 测试不同的查询方法:`);
 
     const currentTick = pool.currentTick;
@@ -649,7 +843,7 @@ export class LiquidityV4CollectorService {
 
       // 方法1: getTickInfo
       try {
-        const result = await this.stateViewContract.getTickInfo(pool.poolId, tick);
+        const result = await stateViewContract.getTickInfo(pool.poolId, tick);
         this.logger.log(`     getTickInfo: gross=${result.liquidityGross.toString()}, net=${result.liquidityNet.toString()}`);
 
         if (result.liquidityGross.gt(0)) {
@@ -661,7 +855,7 @@ export class LiquidityV4CollectorService {
 
       // 方法2: getTickLiquidity
       try {
-        const result = await this.stateViewContract.getTickLiquidity(pool.poolId, tick);
+        const result = await stateViewContract.getTickLiquidity(pool.poolId, tick);
         this.logger.log(`     getTickLiquidity: gross=${result.liquidityGross.toString()}, net=${result.liquidityNet.toString()}`);
       } catch (error) {
         this.logger.log(`     getTickLiquidity 失败: ${error.message.split('(')[0]}`);
@@ -671,7 +865,7 @@ export class LiquidityV4CollectorService {
       try {
         const wordIndex = Math.floor(tick / 256);
         const bitIndex = tick >= 0 ? tick % 256 : 256 + (tick % 256);
-        const bitmap = await this.stateViewContract.getTickBitmap(pool.poolId, wordIndex);
+        const bitmap = await stateViewContract.getTickBitmap(pool.poolId, wordIndex);
         const bitmapBigInt = BigInt(bitmap.toString());
         const isBitSet = (bitmapBigInt >> BigInt(bitIndex)) & BigInt(1);
 
@@ -688,11 +882,14 @@ export class LiquidityV4CollectorService {
    * 原始存储读取测试
    */
   private async testRawStorageAccess(pool: PoolV4) {
+    // 🔥 修复：使用 pool.chainId 获取 StateView 合约和配置
+    const stateViewContract = this.getStateViewContract(pool.chainId);
+    const config = this.getChainConfig(pool.chainId);
     this.logger.log(`\n4️⃣ 原始存储访问测试:`);
 
     try {
       // 尝试使用 PoolManager 直接查询（如果 StateView 有问题）
-      const poolManagerAddress = this.configService.get<string>("ethereum.poolManagerAddress");
+      const poolManagerAddress = config.poolManagerAddress;
 
       if (poolManagerAddress) {
         this.logger.log(`   尝试直接访问 PoolManager: ${poolManagerAddress}`);
@@ -705,7 +902,7 @@ export class LiquidityV4CollectorService {
         const poolManager = new ethers.Contract(
           poolManagerAddress,
           poolManagerABI,
-          this.stateViewContract.provider
+          stateViewContract.provider
         );
 
         try {
@@ -716,8 +913,8 @@ export class LiquidityV4CollectorService {
           this.logger.log(`     PoolManager liquidity: ${liquidity.toString()}`);
 
           // 对比 StateView 和 PoolManager 的结果
-          const stateViewSlot0 = await this.stateViewContract.getSlot0(pool.poolId);
-          const stateViewLiquidity = await this.stateViewContract.getLiquidity(pool.poolId);
+          const stateViewSlot0 = await stateViewContract.getSlot0(pool.poolId);
+          const stateViewLiquidity = await stateViewContract.getLiquidity(pool.poolId);
 
           if (slot0[1].toString() !== stateViewSlot0.tick.toString()) {
             this.logger.error(`     🚨 tick 不一致！PoolManager: ${slot0[1]}, StateView: ${stateViewSlot0.tick}`);
@@ -741,23 +938,27 @@ export class LiquidityV4CollectorService {
    * 针对空池子的特殊处理
    */
   private async handleEmptyPool(pool: PoolV4) {
+    // 🔥 修复：使用 pool.chainId 获取 StateView 合约和配置
+    const stateViewContract = this.getStateViewContract(pool.chainId);
+    const config = this.getChainConfig(pool.chainId);
+
     this.logger.log(`\n5️⃣ 空池子专项分析:`);
 
     // 1. 检查是否曾经有过流动性（历史事件）
     this.logger.log(`   检查历史流动性事件...`);
 
     try {
-      const poolManagerAddress = this.configService.get<string>("ethereum.poolManagerAddress");
+      const poolManagerAddress = config.poolManagerAddress;
       const poolManager = new ethers.Contract(
         poolManagerAddress,
         [
           "event ModifyLiquidity(bytes32 indexed id, address indexed sender, int24 tickLower, int24 tickUpper, int256 liquidityDelta, bytes32 salt)"
         ],
-        this.stateViewContract.provider
+        stateViewContract.provider
       );
 
       // 查询最近1000个区块的事件
-      const currentBlock = await this.stateViewContract.provider.getBlock('latest');
+      const currentBlock = await stateViewContract.provider.getBlock('latest');
       const fromBlock = Math.max(0, currentBlock.number - 1000);
 
       const filter = poolManager.filters.ModifyLiquidity(pool.poolId);
@@ -773,7 +974,7 @@ export class LiquidityV4CollectorService {
           // 测试这些历史 tick
           for (const tick of [tickLower, tickUpper]) {
             try {
-              const tickInfo = await this.stateViewContract.getTickInfo(pool.poolId, tick);
+              const tickInfo = await stateViewContract.getTickInfo(pool.poolId, tick);
               if (tickInfo.liquidityGross.gt(0)) {
                 this.logger.log(`     🎉 历史 tick ${tick} 仍有流动性: ${tickInfo.liquidityGross.toString()}`);
               }
@@ -795,6 +996,8 @@ export class LiquidityV4CollectorService {
    * 比较不同合约的结果
    */
   private async compareWithWorkingPools(pool: PoolV4) {
+    // 🔥 修复：使用 pool.chainId 获取 StateView 合约
+    const stateViewContract = this.getStateViewContract(pool.chainId);
     this.logger.log(`\n🔄 比较不同数据源:`);
 
     try {
@@ -814,9 +1017,9 @@ export class LiquidityV4CollectorService {
         for (const method of testMethods) {
           try {
             const contract = new ethers.Contract(
-              this.stateViewContract.address,
+              stateViewContract.address,
               [`function ${method}() external view returns (string)`],
-              this.stateViewContract.provider
+              stateViewContract.provider
             );
             const result = await contract[method]();
             this.logger.log(`     StateView ${method}: ${result}`);
@@ -832,7 +1035,7 @@ export class LiquidityV4CollectorService {
       this.logger.log(`   🧪 深度测试 bitmap 数据准确性:`);
 
       const testWord = -80; // 已知有活跃数据的 word
-      const bitmap = await this.stateViewContract.getTickBitmap(pool.poolId, testWord);
+      const bitmap = await stateViewContract.getTickBitmap(pool.poolId, testWord);
       const bitmapBigInt = BigInt(bitmap.toString());
 
       this.logger.log(`     Word ${testWord} bitmap: ${bitmap.toString()}`);
@@ -859,7 +1062,7 @@ export class LiquidityV4CollectorService {
         const tick = testWord * 256 + bit;
 
         try {
-          const tickInfo = await this.stateViewContract.getTickInfo(pool.poolId, tick);
+          const tickInfo = await stateViewContract.getTickInfo(pool.poolId, tick);
           if (tickInfo.liquidityGross.gt(0)) {
             ticksWithLiquidity++;
             this.logger.log(`     ✅ Tick ${tick} 确实有流动性: ${tickInfo.liquidityGross.toString()}`);
@@ -891,12 +1094,16 @@ export class LiquidityV4CollectorService {
    * 修复版本的调试方法
    */
   private async debugV4TickData(pool: PoolV4) {
-    this.logger.log(`🐛 开始调试 V4 池子 ${pool.poolId}`);
+    // 🔥 修复：使用 pool.chainId 获取 StateView 合约
+    const stateViewContract = this.getStateViewContract(pool.chainId);
+    const config = this.getChainConfig(pool.chainId);
+
+    this.logger.log(`🐛 开始调试 V4 池子 ${pool.poolId} (Chain: ${pool.chainId})`);
 
     try {
       // 1. 基础连通性测试
-      const slot0 = await this.stateViewContract.getSlot0(pool.poolId);
-      const liquidity = await this.stateViewContract.getLiquidity(pool.poolId);
+      const slot0 = await stateViewContract.getSlot0(pool.poolId);
+      const liquidity = await stateViewContract.getLiquidity(pool.poolId);
 
       this.logger.log(`✅ 基础数据获取成功:`);
       this.logger.log(`   当前 tick: ${slot0.tick}`);
@@ -912,7 +1119,7 @@ export class LiquidityV4CollectorService {
       for (const tick of testTicks) {
         // 方法1: getTickLiquidity (2个返回值)
         try {
-          const result1 = await this.stateViewContract.getTickLiquidity(pool.poolId, tick);
+          const result1 = await stateViewContract.getTickLiquidity(pool.poolId, tick);
           this.logger.log(`   getTickLiquidity(${tick}): gross=${result1.liquidityGross.toString()}, net=${result1.liquidityNet.toString()}`);
         } catch (error) {
           this.logger.log(`   getTickLiquidity(${tick}) 失败: ${error.message.split('(')[0]}`);
@@ -920,7 +1127,7 @@ export class LiquidityV4CollectorService {
 
         // 方法2: getTickInfo (4个返回值)
         try {
-          const result2 = await this.stateViewContract.getTickInfo(pool.poolId, tick);
+          const result2 = await stateViewContract.getTickInfo(pool.poolId, tick);
           this.logger.log(`   getTickInfo(${tick}): gross=${result2.liquidityGross.toString()}, net=${result2.liquidityNet.toString()}`);
         } catch (error) {
           this.logger.log(`   getTickInfo(${tick}) 失败: ${error.message.split('(')[0]}`);
@@ -929,12 +1136,12 @@ export class LiquidityV4CollectorService {
         // 方法3: 直接使用原始合约调用测试
         try {
           const rawContract = new ethers.Contract(
-            this.stateViewContract.address,
+            stateViewContract.address,
             [
               "function getTickLiquidity(bytes32,int24) external view returns (uint128,int128)",
               "function getTickInfo(bytes32,int24) external view returns (uint128,int128,uint256,uint256)"
             ],
-            this.stateViewContract.provider
+            stateViewContract.provider
           );
 
           const rawResult = await rawContract.getTickLiquidity(pool.poolId, tick);
@@ -950,7 +1157,7 @@ export class LiquidityV4CollectorService {
       // 测试一个已知活跃的 word
       const testWord = -80; // 日志中显示的活跃 word
       try {
-        const bitmap = await this.stateViewContract.getTickBitmap(pool.poolId, testWord);
+        const bitmap = await stateViewContract.getTickBitmap(pool.poolId, testWord);
         this.logger.log(`Word ${testWord} bitmap: ${bitmap.toString()}`);
 
         if (bitmap.gt(0)) {
@@ -973,7 +1180,7 @@ export class LiquidityV4CollectorService {
             this.logger.log(`\n   验证 tick ${tick} (bit ${bit}):`);
 
             try {
-              const tickInfo = await this.stateViewContract.getTickInfo(pool.poolId, tick);
+              const tickInfo = await stateViewContract.getTickInfo(pool.poolId, tick);
               this.logger.log(`     getTickInfo: gross=${tickInfo.liquidityGross.toString()}, net=${tickInfo.liquidityNet.toString()}`);
 
               if (tickInfo.liquidityGross.gt(0)) {
@@ -992,11 +1199,11 @@ export class LiquidityV4CollectorService {
 
       // 4. 测试合约地址和网络连接
       this.logger.log(`\n🌐 验证合约连接:`);
-      this.logger.log(`   StateView 地址: ${this.stateViewContract.address}`);
-      this.logger.log(`   Provider URL: ${this.configService.get<string>("ethereum.rpcUrl")}`);
+      this.logger.log(`   StateView 地址: ${stateViewContract.address}`);
+      this.logger.log(`   Provider URL: ${config.rpcUrl}`);
 
       try {
-        const code = await this.stateViewContract.provider.getCode(this.stateViewContract.address);
+        const code = await stateViewContract.provider.getCode(stateViewContract.address);
         this.logger.log(`   合约代码长度: ${code.length} 字符`);
 
         if (code === '0x') {
@@ -1016,10 +1223,13 @@ export class LiquidityV4CollectorService {
   /**
    * 修复版本的获取 tick 信息方法
    */
-  private async getTickDetails(poolId: string, tick: number): Promise<any> {
+  private async getTickDetails(poolId: string, tick: number, chainId: number): Promise<any> {
+    // 🔥 修复：使用 chainId 获取 StateView 合约
+    const stateViewContract = this.getStateViewContract(chainId);
+
     try {
       // 尝试使用 getTickInfo（推荐方法，返回更多信息）
-      const tickInfo = await this.stateViewContract.getTickInfo(poolId, tick);
+      const tickInfo = await stateViewContract.getTickInfo(poolId, tick);
 
       return {
         tick,
@@ -1032,7 +1242,7 @@ export class LiquidityV4CollectorService {
     } catch (error) {
       // 如果 getTickInfo 失败，尝试 getTickLiquidity
       try {
-        const tickLiquidity = await this.stateViewContract.getTickLiquidity(poolId, tick);
+        const tickLiquidity = await stateViewContract.getTickLiquidity(poolId, tick);
 
         return {
           tick,
@@ -1050,7 +1260,9 @@ export class LiquidityV4CollectorService {
   /**
    * 修复版本的 findActiveTicks，包含 tickSpacing 对齐
    */
-  private async findActiveTicksFixed(poolId: string, currentTick: number, tickSpacing: number): Promise<number[]> {
+  private async findActiveTicksFixed(poolId: string, currentTick: number, tickSpacing: number, chainId: number): Promise<number[]> {
+    // 🔥 修复：使用 chainId 获取 StateView 合约
+    const stateViewContract = this.getStateViewContract(chainId);
     const activeTicks: number[] = [];
 
     try {
@@ -1061,7 +1273,7 @@ export class LiquidityV4CollectorService {
 
       for (const word of knownActiveWords) {
         try {
-          const bitmap = await this.stateViewContract.getTickBitmap(poolId, word);
+          const bitmap = await stateViewContract.getTickBitmap(poolId, word);
 
           if (bitmap.gt(0)) {
             this.logger.log(`✅ Word ${word} 有活跃 ticks`);
@@ -1106,17 +1318,180 @@ export class LiquidityV4CollectorService {
   }
 
   /**
-   * 从事件日志中查找有流动性的 tick（更可靠的方法）
+   * 🔥 新增：使用 StateView 的 getTickBitmap 和 getTickLiquidity 获取流动性分布
+   * 这是最可靠的方法，直接从链上状态读取
    */
-  private async findTicksFromEvents(poolId: string, tickSpacing: number): Promise<any[]> {
+  private async findTicksFromStateView(poolId: string, tickSpacing: number, chainId: number): Promise<any[]> {
+    const stateViewContract = this.getStateViewContract(chainId);
+    const validTicks: any[] = [];
+
+    const startTime = Date.now();
+    this.logger.log(`🔍 [StateView] 开始使用 getTickBitmap 和 getTickLiquidity 查找流动性分布...`);
+    this.logger.log(`   PoolId: ${poolId}`);
+    this.logger.log(`   ChainId: ${chainId}`);
+    this.logger.log(`   TickSpacing: ${tickSpacing}`);
+
+    try {
+      // 步骤1: 使用 getTickBitmap 找出所有有流动性的 tick
+      // 🔥 固定区间：最小 tick = -887272, 最大 tick = +887272
+      const MIN_TICK = -887272;
+      const MAX_TICK = 887272;
+      const MIN_WORD = Math.floor(MIN_TICK / 256); // -3466
+      const MAX_WORD = Math.floor(MAX_TICK / 256); // 3466
+      const totalWords = MAX_WORD - MIN_WORD + 1; // 完整扫描所有 words
+
+      this.logger.log(`📊 [Bitmap扫描] 开始全区间扫描 bitmap:`);
+      this.logger.log(`   Tick 范围: ${MIN_TICK} 到 ${MAX_TICK}`);
+      this.logger.log(`   Word 范围: ${MIN_WORD} 到 ${MAX_WORD}`);
+      this.logger.log(`   总扫描量: ${totalWords} 个 words（完整扫描，不跳过的）`);
+
+      const tickSet = new Set<number>();
+      let scannedWords = 0;
+      let foundActiveWords = 0;
+      const bitmapScanStartTime = Date.now();
+
+      // 🔥 完整扫描整个区间：逐个扫描所有 words
+      for (let word = MIN_WORD; word <= MAX_WORD; word++) {
+        const wordStartTime = Date.now();
+        try {
+          const bitmap = await stateViewContract.getTickBitmap(poolId, word);
+          const wordDuration = Date.now() - wordStartTime;
+          scannedWords++;
+
+          if (bitmap.gt(0)) {
+            foundActiveWords++;
+
+            // 解析 bitmap 中的所有活跃 bits
+            const bitmapBigInt = BigInt(bitmap.toString());
+            let wordTicksFound = 0;
+
+            for (let bit = 0; bit < 256; bit++) {
+              if ((bitmapBigInt >> BigInt(bit)) & BigInt(1)) {
+                const tick = word * 256 + bit;
+                // 验证 tick 在有效范围内
+                if (tick >= MIN_TICK && tick <= MAX_TICK) {
+                  tickSet.add(tick);
+                  wordTicksFound++;
+                }
+              }
+            }
+
+            if (wordTicksFound > 0) {
+              this.logger.log(`✅ [Bitmap] Word ${word} 有活跃区域: 找到 ${wordTicksFound} 个 tick (耗时: ${wordDuration}ms, 进度: ${scannedWords}/${totalWords})`);
+            }
+          }
+
+          // 每扫描100个words输出一次进度
+          if (scannedWords % 100 === 0) {
+            const elapsed = Date.now() - bitmapScanStartTime;
+            const avgTimePerWord = elapsed / scannedWords;
+            const estimatedRemaining = avgTimePerWord * (totalWords - scannedWords);
+            const progress = ((scannedWords / totalWords) * 100).toFixed(1);
+            this.logger.log(`📊 [Bitmap扫描进度] ${scannedWords}/${totalWords} (${progress}%), 找到 ${foundActiveWords} 个活跃 words, ${tickSet.size} 个活跃 tick, 已用: ${(elapsed / 1000).toFixed(1)}s, 预计剩余: ${(estimatedRemaining / 1000).toFixed(1)}s`);
+          }
+        } catch (error) {
+          this.logger.warn(`⚠️  [Bitmap] Word ${word} 扫描失败: ${error.message}`);
+        }
+      }
+
+      const bitmapScanDuration = Date.now() - bitmapScanStartTime;
+      this.logger.log(`✅ [Bitmap扫描完成] 扫描 ${scannedWords} 个 words，找到 ${foundActiveWords} 个活跃区域，发现 ${tickSet.size} 个活跃 tick (总耗时: ${(bitmapScanDuration / 1000).toFixed(1)}s)`);
+
+      // 步骤2: 对每个找到的 tick，使用 getTickLiquidity 获取流动性信息
+      // 🔥 修复：先过滤出对齐到 tickSpacing 的 tick
+      const alignedTicks = Array.from(tickSet).filter(tick => tick % tickSpacing === 0);
+      this.logger.log(`📊 [Tick过滤] 找到 ${tickSet.size} 个活跃 tick，其中 ${alignedTicks.length} 个对齐到 tickSpacing=${tickSpacing}`);
+
+      const tickArray = alignedTicks.sort((a, b) => a - b);
+      this.logger.log(`🔍 [流动性查询] 开始查询 ${tickArray.length} 个对齐 tick 的流动性信息...`);
+
+      const liquidityQueryStartTime = Date.now();
+      let successCount = 0;
+      let errorCount = 0;
+      let emptyLiquidityCount = 0;
+      const batchSize = 100; // 每查询100个输出一次进度
+
+      for (let i = 0; i < tickArray.length; i++) {
+        const tick = tickArray[i];
+        const tickStartTime = Date.now();
+
+        try {
+          // 使用 getTickLiquidity 获取流动性信息（更轻量级）
+          const tickLiquidity = await stateViewContract.getTickLiquidity(poolId, tick);
+          const tickDuration = Date.now() - tickStartTime;
+
+          if (tickLiquidity.liquidityGross.gt(0)) {
+            validTicks.push({
+              tick,
+              liquidityGross: tickLiquidity.liquidityGross,
+              liquidityNet: tickLiquidity.liquidityNet,
+              initialized: true,
+              fromStateView: true // 标记来自 StateView
+            });
+            successCount++;
+
+            if (successCount <= 10) {
+              this.logger.log(`   ✅ Tick ${tick}: liquidityGross=${tickLiquidity.liquidityGross.toString()}, liquidityNet=${tickLiquidity.liquidityNet.toString()} (耗时: ${tickDuration}ms)`);
+            }
+          } else {
+            emptyLiquidityCount++;
+            if (emptyLiquidityCount <= 5) {
+              this.logger.log(`   ⚠️  Tick ${tick}: 无流动性 (耗时: ${tickDuration}ms)`);
+            }
+          }
+        } catch (error) {
+          errorCount++;
+          const tickDuration = Date.now() - tickStartTime;
+          if (errorCount <= 5) {
+            this.logger.warn(`   ❌ Tick ${tick} 查询失败: ${error.message} (耗时: ${tickDuration}ms)`);
+          }
+        }
+
+        // 每查询100个输出进度
+        if ((i + 1) % batchSize === 0 || i === tickArray.length - 1) {
+          const elapsed = Date.now() - liquidityQueryStartTime;
+          const avgTimePerTick = elapsed / (i + 1);
+          const estimatedRemaining = avgTimePerTick * (tickArray.length - i - 1);
+          const progress = ((i + 1) / tickArray.length * 100).toFixed(1);
+          this.logger.log(`📊 [流动性查询进度] ${i + 1}/${tickArray.length} (${progress}%), 成功: ${successCount}, 失败: ${errorCount}, 无流动性: ${emptyLiquidityCount}`);
+          this.logger.log(`   已用: ${(elapsed / 1000).toFixed(1)}s, 平均: ${avgTimePerTick.toFixed(0)}ms/tick, 预计剩余: ${(estimatedRemaining / 1000).toFixed(1)}s`);
+        }
+      }
+
+      const liquidityQueryDuration = Date.now() - liquidityQueryStartTime;
+      const totalDuration = Date.now() - startTime;
+      this.logger.log(`✅ [StateView查询完成]`);
+      this.logger.log(`   Bitmap扫描: ${(bitmapScanDuration / 1000).toFixed(1)}s`);
+      this.logger.log(`   流动性查询: ${(liquidityQueryDuration / 1000).toFixed(1)}s (${tickArray.length} 个 tick, 平均: ${(liquidityQueryDuration / tickArray.length).toFixed(0)}ms/tick)`);
+      this.logger.log(`   总耗时: ${(totalDuration / 1000).toFixed(1)}s`);
+      this.logger.log(`   结果: 扫描 ${scannedWords} 个 words，找到 ${foundActiveWords} 个活跃区域，${tickSet.size} 个活跃 tick，最终获取到 ${validTicks.length} 个有流动性的 tick`);
+
+      // 按 tick 排序
+      validTicks.sort((a, b) => a.tick - b.tick);
+      return validTicks;
+
+    } catch (error) {
+      this.logger.error(`使用 StateView 获取流动性分布失败: ${error.message}`);
+      return [];
+    }
+  }
+
+  /**
+   * 🔥 修复：从事件日志中查找有流动性的 tick（作为备用方案）
+   */
+  private async findTicksFromEvents(poolId: string, tickSpacing: number, chainId: number): Promise<any[]> {
+    // 🔥 修复：使用 PoolManager 的 provider，而不是 StateView
+    const config = this.getChainConfig(chainId);
+    const provider = new ethers.providers.JsonRpcProvider(config.rpcUrl);
+
     this.logger.log(`通过事件日志查找有流动性的 tick...`);
 
     try {
-      const poolManagerAddress = this.configService.get<string>("ethereum.poolManagerAddress");
+      const poolManagerAddress = config.poolManagerAddress;
       this.logger.log(`使用 PoolManager 地址: ${poolManagerAddress}`);
 
       // 扩大查询范围
-      const currentBlock = await this.stateViewContract.provider.getBlockNumber();
+      const currentBlock = await provider.getBlockNumber();
       const fromBlock = Math.max(0, currentBlock - 200000); // 扩大到最近20万个区块
 
       this.logger.log(`查询区块范围: ${fromBlock} 到 ${currentBlock} (共 ${currentBlock - fromBlock} 个区块)`);
@@ -1143,29 +1518,29 @@ export class LiquidityV4CollectorService {
       ];
 
       // 尝试不同的事件类型
-      for (const config of eventConfigs) {
+      for (const eventConfig of eventConfigs) {
         try {
           const eventContract = new ethers.Contract(
             poolManagerAddress,
-            config.abi,
-            this.stateViewContract.provider
+            eventConfig.abi,
+            provider
           );
 
           let filter;
-          if (config.hasPoolId) {
-            filter = eventContract.filters[config.name](poolId);
+          if (eventConfig.hasPoolId) {
+            filter = eventContract.filters[eventConfig.name](poolId);
           } else {
-            filter = eventContract.filters[config.name]();
+            filter = eventContract.filters[eventConfig.name]();
           }
 
           const events = await eventContract.queryFilter(filter, fromBlock, currentBlock);
-          this.logger.log(`${config.name} 事件找到 ${events.length} 个`);
+          this.logger.log(`${eventConfig.name} 事件找到 ${events.length} 个`);
 
           if (events.length > 0) {
             allEvents = allEvents.concat(events);
           }
         } catch (error) {
-          this.logger.log(`${config.name} 事件查询失败: ${error.message.split('(')[0]}`);
+          this.logger.log(`${eventConfig.name} 事件查询失败: ${error.message.split('(')[0]}`);
         }
       }
 
@@ -1197,35 +1572,28 @@ export class LiquidityV4CollectorService {
       // 如果没有找到事件，回退到暴力扫描已知范围
       if (tickSet.size === 0) {
         this.logger.log(`未找到事件，回退到暴力扫描已知活跃范围...`);
-        return await this.bruteForceKnownRange(poolId, tickSpacing);
+        return await this.bruteForceKnownRange(poolId, tickSpacing, chainId);
       }
 
-      // 验证这些 ticks 是否仍有流动性
+      // 🔥 修复：不再验证 tick 流动性（避免依赖 StateView）
+      // 直接使用从事件中提取的 tick，后续会在 calculateV4LiquidityDistribution 中通过 PoolManager 获取详细数据
       const validTicks: any[] = [];
 
       for (const tick of Array.from(tickSet)) {
-        try {
-          const tickInfo = await this.stateViewContract.getTickInfo(poolId, tick);
-
-          if (tickInfo.liquidityGross.gt(0)) {
-            validTicks.push({
-              tick,
-              liquidityGross: tickInfo.liquidityGross,
-              liquidityNet: tickInfo.liquidityNet,
-              initialized: true
-            });
-
-            this.logger.log(`✅ Tick ${tick}: liquidityGross=${tickInfo.liquidityGross.toString()}`);
-          }
-        } catch (error) {
-          // 忽略查询失败的 tick
-        }
+        // 直接添加从事件中提取的 tick，后续会查询实际流动性
+        validTicks.push({
+          tick,
+          liquidityGross: ethers.BigNumber.from(0), // 占位符，后续会查询
+          liquidityNet: ethers.BigNumber.from(0), // 占位符，后续会查询
+          initialized: true,
+          fromEvent: true // 标记来自事件
+        });
       }
 
       // 按 tick 排序
       validTicks.sort((a, b) => a.tick - b.tick);
 
-      this.logger.log(`事件扫描最终找到 ${validTicks.length} 个有效 tick`);
+      this.logger.log(`事件扫描找到 ${validTicks.length} 个 tick（将从 PoolManager 查询实际流动性）`);
       return validTicks;
 
     } catch (error) {
@@ -1233,20 +1601,23 @@ export class LiquidityV4CollectorService {
 
       // 如果事件扫描完全失败，回退到暴力扫描
       this.logger.log(`事件扫描失败，回退到暴力扫描...`);
-      return await this.bruteForceKnownRange(poolId, tickSpacing);
+      return await this.bruteForceKnownRange(poolId, tickSpacing, chainId);
     }
   }
 
   /**
    * 暴力扫描已知活跃范围（最后的备用方案）
    */
-  private async bruteForceKnownRange(poolId: string, tickSpacing: number): Promise<any[]> {
+  private async bruteForceKnownRange(poolId: string, tickSpacing: number, chainId: number): Promise<any[]> {
+    // 🔥 修复：使用 chainId 获取 StateView 合约
+    const stateViewContract = this.getStateViewContract(chainId);
+
     this.logger.log(`开始暴力扫描已知活跃范围...`);
 
     // 首先获取当前 tick，围绕它扫描
     let currentTick = -192000; // 从日志中看到的大概位置
     try {
-      const slot0 = await this.stateViewContract.getSlot0(poolId);
+      const slot0 = await stateViewContract.getSlot0(poolId);
       currentTick = parseInt(slot0.tick.toString());
       this.logger.log(`获取到当前 tick: ${currentTick}`);
     } catch (error) {
@@ -1255,13 +1626,16 @@ export class LiquidityV4CollectorService {
 
     const validTicks: any[] = [];
 
-    // 🔥 全区间扫描：从 -887272 到 887272
+    // 🔥 全区间扫描：从 -887272 到 887272（固定区间）
     const MIN_TICK = -887272;
     const MAX_TICK = 887272;
 
     // 确保起始和结束 tick 对齐到 tickSpacing
     const startTick = Math.ceil(MIN_TICK / tickSpacing) * tickSpacing;
     const endTick = Math.floor(MAX_TICK / tickSpacing) * tickSpacing;
+
+    this.logger.log(`📊 [全区间扫描] Tick 范围: ${MIN_TICK} 到 ${MAX_TICK}`);
+    this.logger.log(`   对齐后的范围: ${startTick} 到 ${endTick}, tickSpacing=${tickSpacing}`);
 
     const totalTicks = Math.floor((endTick - startTick) / tickSpacing) + 1;
     this.logger.log(`全区间扫描范围: ${startTick} 到 ${endTick}, tickSpacing=${tickSpacing}`);
@@ -1281,7 +1655,7 @@ export class LiquidityV4CollectorService {
 
     for (const tick of priorityTicks) {
       try {
-        const tickInfo = await this.stateViewContract.getTickInfo(poolId, tick);
+        const tickInfo = await stateViewContract.getTickInfo(poolId, tick);
         scannedCount++;
 
         this.logger.log(`检查关键 tick ${tick}: liquidityGross=${tickInfo.liquidityGross.toString()}, liquidityNet=${tickInfo.liquidityNet.toString()}`);
@@ -1319,10 +1693,12 @@ export class LiquidityV4CollectorService {
     const abi = [
       "function ticks(bytes32 poolId, int24 tick) external view returns (uint128 liquidityGross, int128 liquidityNet, uint256 feeGrowthOutside0X128, uint256 feeGrowthOutside1X128, int56 tickCumulativeOutside, uint160 secondsPerLiquidityOutsideX128, uint32 secondsOutside, bool initialized)",
     ];
-    const rpcUrl = this.configService.get<string>("ethereum.rpcUrl");
+    // 🔥 修复：根据 chainId 获取正确的 RPC URL
+    const config = this.getChainConfig(chainId);
+    const rpcUrl = config.rpcUrl;
 
     try {
-      const batchResults = await this.batchFetchV4Ticks(poolId, tickList, abi, rpcUrl);
+      const batchResults = await this.batchFetchV4Ticks(poolId, tickList, abi, rpcUrl, chainId);
       console.log("batchResults", batchResults.length);
       // 处理批量结果
       for (let i = 0; i < tickList.length; i++) {
@@ -1393,11 +1769,13 @@ export class LiquidityV4CollectorService {
   ): Promise<any[]> {
     this.logger.log(`开始重新计算 ${existingData.length} 个 tick 的价格和代币数量`);
 
+    // 🔥 修复：使用 pool.chainId 获取 UniswapV4Utils
+    const uniswapV4Utils = this.getUniswapV4Utils(pool.chainId);
     const recalculatedData: any[] = [];
 
     try {
       // 🔥 修复 ETH 地址问题：创建 Token 对象
-      const chainId = this.configService.get<number>("ethereum.chainId");
+      const chainId = pool.chainId;
 
       // 处理 ETH 地址和 USDT decimals 问题
       const token0Address = pool.token0Address === '0x0000000000000000000000000000000000000000'
@@ -1456,7 +1834,7 @@ export class LiquidityV4CollectorService {
           );
 
           // 重新计算价格
-          const price = this.uniswapV4Utils.calculateTickPrice(lowerTick, token0, token1);
+          const price = uniswapV4Utils.calculateTickPrice(lowerTick, token0, token1);
 
           recalculatedData.push({
             id: lowerTickData.id,
@@ -1466,8 +1844,8 @@ export class LiquidityV4CollectorService {
             liquidityNet: lowerTickData.liquidityNet,
             token0Amount: amount0.toString(),
             token1Amount: amount1.toString(),
-            token0AmountFormatted: this.uniswapV4Utils.formatTokenAmount(amount0, pool.token0Decimals),
-            token1AmountFormatted: this.uniswapV4Utils.formatTokenAmount(amount1, pool.token1Decimals),
+            token0AmountFormatted: uniswapV4Utils.formatTokenAmount(amount0, pool.token0Decimals),
+            token1AmountFormatted: uniswapV4Utils.formatTokenAmount(amount1, pool.token1Decimals),
           });
 
           this.logger.log(`重新计算区间 [${lowerTick}, ${upperTick}]: 价格=${price}, 流动性=${intervalLiquidity.toString()}, token0=${amount0.toString()}, token1=${amount1.toString()}`);
@@ -1511,7 +1889,8 @@ export class LiquidityV4CollectorService {
   }
 
   /**
-   * 计算 V4 流动性分布（修复版本）
+   * 🔥 修复：计算 V4 流动性分布（不依赖 StateView）
+   * 对于从事件中获取的 tick，需要先查询其流动性信息
    */
   private async calculateV4LiquidityDistribution(
     initializedTicks: any[],
@@ -1519,8 +1898,56 @@ export class LiquidityV4CollectorService {
     currentSqrtPriceX96: ethers.BigNumber,
     pool: PoolV4
   ): Promise<any[]> {
+    // 🔥 修复：使用 pool.chainId 获取配置和工具类（不再依赖 StateView）
+    const uniswapV4Utils = this.getUniswapV4Utils(pool.chainId);
+    const config = this.getChainConfig(pool.chainId);
+    const provider = new ethers.providers.JsonRpcProvider(config.rpcUrl);
+    const latestBlock = await provider.getBlock("latest");
 
-    this.logger.log(`计算 V4 流动性分布，当前 tick: ${currentTick}`);
+    this.logger.log(`计算 V4 流动性分布，当前 tick: ${currentTick}, tick 数量: ${initializedTicks.length}`);
+
+    // 🔥 对于标记为 fromEvent 的 tick，尝试通过 StateView 获取流动性信息（可选）
+    // 如果 StateView 不可用，则使用估算值或跳过
+    let tickDataWithLiquidity = initializedTicks;
+
+    // 检查是否有需要查询流动性的 tick
+    const needsLiquidityQuery = initializedTicks.some(t => t.fromEvent && (!t.liquidityGross || t.liquidityGross.eq(0)));
+
+    if (needsLiquidityQuery) {
+      this.logger.log(`检测到 ${initializedTicks.filter(t => t.fromEvent).length} 个从事件获取的 tick，尝试查询流动性信息...`);
+
+      try {
+        const stateViewContract = this.getStateViewContract(pool.chainId);
+        const updatedTicks = [];
+
+        for (const tickData of initializedTicks) {
+          if (tickData.fromEvent && (!tickData.liquidityGross || tickData.liquidityGross.eq(0))) {
+            try {
+              const tickInfo = await stateViewContract.getTickInfo(pool.poolId, tickData.tick);
+              if (tickInfo.liquidityGross.gt(0)) {
+                updatedTicks.push({
+                  ...tickData,
+                  liquidityGross: tickInfo.liquidityGross,
+                  liquidityNet: tickInfo.liquidityNet,
+                  fromEvent: false
+                });
+              }
+            } catch (error) {
+              // StateView 查询失败，保留原数据或跳过
+              this.logger.warn(`无法查询 tick ${tickData.tick} 的流动性: ${error.message}`);
+            }
+          } else {
+            updatedTicks.push(tickData);
+          }
+        }
+
+        tickDataWithLiquidity = updatedTicks;
+        this.logger.log(`成功查询到 ${tickDataWithLiquidity.length} 个有流动性的 tick`);
+      } catch (error) {
+        this.logger.warn(`StateView 查询失败，使用事件中的 tick 数据: ${error.message}`);
+        // 如果 StateView 不可用，继续使用事件中的 tick
+      }
+    }
 
     const tickDataArray: any[] = [];
 
@@ -1528,18 +1955,19 @@ export class LiquidityV4CollectorService {
     let activeLiquidity = ethers.BigNumber.from(0);
 
     // 累加所有当前价格左侧（包含）的 tick 的 liquidityNet
-    for (const tickData of initializedTicks) {
-      if (tickData.tick <= currentTick) {
-        activeLiquidity = activeLiquidity.add(tickData.liquidityNet);
+    for (const tickData of tickDataWithLiquidity) {
+      const liquidityNet = tickData.liquidityNet || ethers.BigNumber.from(0);
+      if (tickData.tick <= currentTick && liquidityNet.gt(0)) {
+        activeLiquidity = activeLiquidity.add(liquidityNet);
       }
     }
 
     this.logger.log(`当前价格点的活跃流动性: ${activeLiquidity.toString()}`);
 
     // 计算每个区间的流动性分布
-    for (let i = 0; i < initializedTicks.length - 1; i++) {
-      const lowerTickData = initializedTicks[i];
-      const upperTickData = initializedTicks[i + 1];
+    for (let i = 0; i < tickDataWithLiquidity.length - 1; i++) {
+      const lowerTickData = tickDataWithLiquidity[i];
+      const upperTickData = tickDataWithLiquidity[i + 1];
 
       const lowerTick = lowerTickData.tick;
       const upperTick = upperTickData.tick;
@@ -1547,12 +1975,14 @@ export class LiquidityV4CollectorService {
       // 计算这个区间的活跃流动性
       let intervalLiquidity = ethers.BigNumber.from(0);
 
-      for (const tickData of initializedTicks) {
-        if (tickData.tick <= lowerTick) {
-          intervalLiquidity = intervalLiquidity.add(tickData.liquidityNet);
+      for (const tickData of tickDataWithLiquidity) {
+        const liquidityNet = tickData.liquidityNet || ethers.BigNumber.from(0);
+        if (tickData.tick <= lowerTick && liquidityNet.gt(0)) {
+          intervalLiquidity = intervalLiquidity.add(liquidityNet);
         }
       }
 
+      // 只有当区间有流动性时才计算代币数量
       if (intervalLiquidity.gt(0)) {
         const { amount0, amount1 } = this.liquidityCalculator.calculateTokenAmountsInRange(
           intervalLiquidity,
@@ -1562,8 +1992,8 @@ export class LiquidityV4CollectorService {
           currentSqrtPriceX96
         );
 
-        // 计算价格（使用修复后的 Token 对象）
-        const chainId = this.configService.get<number>("ethereum.chainId");
+        // 🔥 修复：使用 pool.chainId 而不是从配置获取（可能获取到错误的 chainId）
+        const chainId = pool.chainId;
 
         // 处理 ETH 地址和 USDT decimals 问题
         const token0Address = pool.token0Address === '0x0000000000000000000000000000000000000000'
@@ -1591,21 +2021,24 @@ export class LiquidityV4CollectorService {
           pool.token1Symbol || 'USDT'
         );
 
-        const price = this.uniswapV4Utils.calculateTickPrice(lowerTick, token0, token1);
+        const price = uniswapV4Utils.calculateTickPrice(lowerTick, token0, token1);
+
+        const liquidityGross = lowerTickData.liquidityGross || ethers.BigNumber.from(0);
+        const liquidityNet = lowerTickData.liquidityNet || ethers.BigNumber.from(0);
 
         tickDataArray.push({
           poolAddress: null,
           poolId: pool.poolId,
           tick: lowerTick,
           price,
-          liquidityGross: lowerTickData.liquidityGross.toString(),
-          liquidityNet: lowerTickData.liquidityNet.toString(),
+          liquidityGross: liquidityGross.toString(),
+          liquidityNet: liquidityNet.toString(),
           initialized: true,
           token0Amount: amount0.toString(),
           token1Amount: amount1.toString(),
-          token0AmountFormatted: this.uniswapV4Utils.formatTokenAmount(amount0, pool.token0Decimals),
-          token1AmountFormatted: this.uniswapV4Utils.formatTokenAmount(amount1, pool.token1Decimals),
-          blockNumber: await this.stateViewContract.provider.getBlockNumber(),
+          token0AmountFormatted: uniswapV4Utils.formatTokenAmount(amount0, pool.token0Decimals),
+          token1AmountFormatted: uniswapV4Utils.formatTokenAmount(amount1, pool.token1Decimals),
+          blockNumber: latestBlock.number,
           blockTimestamp: new Date(),
           version: "v4"
         });
@@ -1616,4 +2049,173 @@ export class LiquidityV4CollectorService {
 
     return tickDataArray;
   }
+
+  /**
+   * 🔥 检查 poolId 对应的池子是否已在链上初始化
+   * 
+   * V4 架构：
+   * - 每个 poolId 对应一个独立的池子
+   * - 如果池子已初始化，会有 Initialize 事件
+   * - 如果池子未初始化，getSlot0 会 revert
+   * 
+   * @param poolId 池子的唯一标识符（bytes32）
+   * @param contractAddress 合约地址（StateView 或 PoolManager）
+   * @param provider RPC Provider
+   * @param stateViewContract StateView 合约实例（如果使用 StateView）
+   * @returns true 如果池子已初始化，false 否则
+   */
+  private async checkPoolInitializedOnChain(
+    poolId: string,
+    contractAddress: string,
+    provider: ethers.providers.JsonRpcProvider,
+    stateViewContract?: ethers.Contract | null
+  ): Promise<boolean> {
+    try {
+      this.logger.log(`检查池子初始化状态:`);
+      this.logger.log(`  PoolId: ${poolId}`);
+      this.logger.log(`  合约地址: ${contractAddress}`);
+      this.logger.log(`  使用合约: ${stateViewContract ? 'StateView' : 'PoolManager'}`);
+
+      // 🔥 先验证合约地址是否有效（检查合约代码）
+      const code = await provider.getCode(contractAddress);
+      if (!code || code === '0x') {
+        this.logger.error(`❌ 合约地址无效或合约未部署: ${contractAddress}`);
+        return false;
+      }
+      this.logger.log(`✅ 合约代码存在 (${code.length} 字符)`);
+
+      // 🔥 如果使用 StateView，尝试直接查询池子状态
+      if (stateViewContract) {
+        try {
+          const slot0 = await stateViewContract.getSlot0(poolId);
+          this.logger.log(`✅ 通过 StateView 成功查询到池子状态，池子已初始化`);
+          return true;
+        } catch (error) {
+          this.logger.warn(`⚠️  StateView getSlot0 调用失败: ${error.message}`);
+          // 继续使用事件查询验证
+        }
+      }
+
+      // 🔥 使用事件查询验证（需要使用 PoolManager 查询事件）
+      // 注意：StateView 可能不发出事件，所以需要用 PoolManager 地址查询事件
+      // 获取 PoolManager 地址用于查询事件（事件总是从 PoolManager 发出）
+      const providerNetwork = await provider.getNetwork();
+      const chainId = providerNetwork.chainId;
+      const getConfigByVersion = this.configService.get<Function>("ethereum.getConfigByVersion");
+      const config = getConfigByVersion(chainId, "v4");
+      const poolManagerAddress = config.poolManagerAddress;
+
+      const poolManagerABI = [
+        "event Initialize(bytes32 indexed id, address indexed currency0, address indexed currency1, uint24 fee, int24 tickSpacing, address hooks, uint160 sqrtPriceX96, int24 tick)"
+      ];
+      const poolManager = new ethers.Contract(
+        poolManagerAddress,
+        poolManagerABI,
+        provider
+      );
+
+      // 查询 Initialize 事件
+      this.logger.log(`查询 Initialize 事件...`);
+      const filter = poolManager.filters.Initialize(poolId);
+      const currentBlock = await provider.getBlockNumber();
+      const fromBlock = Math.max(0, currentBlock - 1000000); // 查询最近100万个区块
+
+      this.logger.log(`查询区块范围: ${fromBlock} 到 ${currentBlock} (共 ${currentBlock - fromBlock} 个区块)`);
+
+      const events = await poolManager.queryFilter(filter, fromBlock, currentBlock);
+
+      // 🔥 如果没找到 Initialize 事件，尝试查询所有 Initialize 事件（不筛选 poolId），看看是否有问题
+      if (events.length === 0) {
+        this.logger.warn(`⚠️  未找到 PoolId ${poolId} 的 Initialize 事件`);
+        this.logger.log(`尝试查询所有 Initialize 事件以验证 PoolManager 是否正确...`);
+        try {
+          const allInitFilter = poolManager.filters.Initialize();
+          const allInitEvents = await poolManager.queryFilter(allInitFilter, fromBlock, currentBlock);
+          this.logger.log(`找到 ${allInitEvents.length} 个 Initialize 事件（不筛选 poolId）`);
+
+          if (allInitEvents.length > 0) {
+            // 检查是否有其他 poolId 的事件
+            const uniquePoolIds = new Set(allInitEvents.map(e => e.args.id));
+            this.logger.log(`这些事件涉及 ${uniquePoolIds.size} 个不同的 poolId`);
+
+            // 检查我们的 poolId 是否在事件中（可能是事件解析问题）
+            const hasOurPoolId = allInitEvents.some(e => e.args.id.toLowerCase() === poolId.toLowerCase());
+            if (hasOurPoolId) {
+              this.logger.warn(`⚠️  虽然过滤器未匹配，但在事件中找到了匹配的 poolId，可能是事件索引问题`);
+            }
+          }
+        } catch (error) {
+          this.logger.warn(`查询所有 Initialize 事件时出错: ${error.message}`);
+        }
+      }
+
+      if (events.length > 0) {
+        this.logger.log(`✅ 找到 PoolId ${poolId} 的初始化事件，池子已在链上初始化`);
+        return true;
+      }
+
+      this.logger.warn(`⚠️  未找到 PoolId ${poolId} 的初始化事件，池子可能未在链上初始化`);
+      return false;
+    } catch (error) {
+      this.logger.warn(`检查池子初始化状态时出错: ${error.message}，假设池子未初始化`);
+      return false;
+    }
+  }
+
+  /**
+   * 🔥 通过多种事件检查 poolId 对应的池子是否在链上存在
+   * 
+   * 检查的事件类型：
+   * - Initialize: 池子初始化事件
+   * - ModifyLiquidity: 流动性修改事件（说明池子已初始化）
+   * - Swap: 交换事件（说明池子已初始化且有活动）
+   * 
+   * @param poolId 池子的唯一标识符（bytes32）
+   * @param poolManagerAddress PoolManager 合约地址
+   * @param provider RPC Provider
+   * @returns true 如果找到任何相关事件，false 否则
+   */
+  private async checkPoolFromEvents(poolId: string, poolManagerAddress: string, provider: ethers.providers.JsonRpcProvider): Promise<boolean> {
+    try {
+      const poolManagerABI = [
+        "event Initialize(bytes32 indexed id, address indexed currency0, address indexed currency1, uint24 fee, int24 tickSpacing, address hooks, uint160 sqrtPriceX96, int24 tick)",
+        "event ModifyLiquidity(bytes32 indexed id, address indexed sender, int24 tickLower, int24 tickUpper, int256 liquidityDelta, bytes32 salt)",
+        "event Swap(bytes32 indexed id, address indexed sender, int128 amount0, int128 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick, uint24 fee)"
+      ];
+      const poolManager = new ethers.Contract(
+        poolManagerAddress,
+        poolManagerABI,
+        provider
+      );
+
+      const currentBlock = await provider.getBlockNumber();
+      const fromBlock = Math.max(0, currentBlock - 1000000);
+
+      // 检查多种事件类型
+      const initFilter = poolManager.filters.Initialize(poolId);
+      const modifyFilter = poolManager.filters.ModifyLiquidity(poolId);
+      const swapFilter = poolManager.filters.Swap(poolId);
+
+      const [initEvents, modifyEvents, swapEvents] = await Promise.all([
+        poolManager.queryFilter(initFilter, fromBlock, currentBlock).catch(() => []),
+        poolManager.queryFilter(modifyFilter, fromBlock, currentBlock).catch(() => []),
+        poolManager.queryFilter(swapFilter, fromBlock, currentBlock).catch(() => [])
+      ]);
+
+      const totalEvents = initEvents.length + modifyEvents.length + swapEvents.length;
+
+      if (totalEvents > 0) {
+        this.logger.log(`✅ 通过事件验证：PoolId ${poolId} 找到 ${totalEvents} 个相关事件`);
+        this.logger.log(`   Initialize: ${initEvents.length}, ModifyLiquidity: ${modifyEvents.length}, Swap: ${swapEvents.length}`);
+        return true;
+      }
+
+      this.logger.warn(`⚠️  未找到 PoolId ${poolId} 的任何相关事件`);
+      return false;
+    } catch (error) {
+      this.logger.warn(`通过事件检查池子时出错: ${error.message}`);
+      return false;
+    }
+  }
 }
+

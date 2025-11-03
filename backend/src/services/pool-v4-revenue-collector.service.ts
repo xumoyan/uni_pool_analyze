@@ -416,7 +416,8 @@ export class PoolV4RevenueCollectorService {
   }
 
   /**
-   * 🔥 混合方案: 使用 FeeGrowth + Events 的最佳方案
+   * 🔥 修复：优先从 Swap 事件直接计算手续费（最可靠的方法）
+   * StateView 的历史区块查询不可靠，改为从事件中直接计算
    */
   private async calculateDailyRevenueHybrid(
     pool: PoolV4,
@@ -427,100 +428,122 @@ export class PoolV4RevenueCollectorService {
     stateViewContract: ethers.Contract
   ) {
     try {
-      // 🔥 步骤1: 使用 getFeeGrowthGlobals 计算精确的手续费收入
-      this.logger.log(`🔍 使用 getFeeGrowthGlobals 计算精确手续费...`);
+      // 🔥 步骤1: 优先从事件中计算手续费和交易量（最可靠的方法）
+      this.logger.log(`🔍 从 Swap 事件中计算手续费和交易量...`);
+      this.logger.log(`使用池子固定手续费: ${pool.feeTier} (费率: ${pool.feeTier / 10000}%)`);
+      const eventData = await this.calculateRevenueFromEvents(
+        pool.poolId,
+        startBlock,
+        endBlock,
+        pool.chainId,
+        pool.token0Decimals,
+        pool.token1Decimals,
+        pool.feeTier  // 🔥 传递池子的固定手续费
+      );
 
-      const [startFeeGrowth, endFeeGrowth] = await Promise.all([
-        this.getFeeGrowthAtBlock(pool.poolId, startBlock, stateViewContract),
-        this.getFeeGrowthAtBlock(pool.poolId, endBlock, stateViewContract)
-      ]);
+      this.logger.log(`从事件计算得到:`);
+      this.logger.log(`  手续费 Token0: ${eventData.feeRevenueToken0.toString()}`);
+      this.logger.log(`  手续费 Token1: ${eventData.feeRevenueToken1.toString()}`);
+      this.logger.log(`  交易量 Token0: ${eventData.volumeToken0.toString()}`);
+      this.logger.log(`  交易量 Token1: ${eventData.volumeToken1.toString()}`);
+      this.logger.log(`  事件数量: ${eventData.eventCount}`);
 
-      this.logger.log(`FeeGrowth 数据获取成功:`);
-      this.logger.log(`  开始块 ${startBlock}:`);
-      this.logger.log(`    Token0: ${startFeeGrowth.feeGrowthGlobal0X128}`);
-      this.logger.log(`    Token1: ${startFeeGrowth.feeGrowthGlobal1X128}`);
-      this.logger.log(`  结束块 ${endBlock}:`);
-      this.logger.log(`    Token0: ${endFeeGrowth.feeGrowthGlobal0X128}`);
-      this.logger.log(`    Token1: ${endFeeGrowth.feeGrowthGlobal1X128}`);
+      // 🔥 步骤2: 尝试从 FeeGrowth 验证（可选，失败不影响）
+      let verificationFeeToken0 = ethers.BigNumber.from(0);
+      let verificationFeeToken1 = ethers.BigNumber.from(0);
+      let averageLiquidity = ethers.BigNumber.from(0);
 
-      // 计算费用增长差值
-      const feeGrowthDelta0 = ethers.BigNumber.from(endFeeGrowth.feeGrowthGlobal0X128)
-        .sub(ethers.BigNumber.from(startFeeGrowth.feeGrowthGlobal0X128));
-      const feeGrowthDelta1 = ethers.BigNumber.from(endFeeGrowth.feeGrowthGlobal1X128)
-        .sub(ethers.BigNumber.from(startFeeGrowth.feeGrowthGlobal1X128));
+      try {
+        this.logger.log(`🔍 尝试使用 FeeGrowth 验证数据（可选）...`);
+        const [startFeeGrowth, endFeeGrowth] = await Promise.all([
+          this.getFeeGrowthAtBlock(pool.poolId, startBlock, stateViewContract),
+          this.getFeeGrowthAtBlock(pool.poolId, endBlock, stateViewContract)
+        ]);
 
-      this.logger.log(`FeeGrowth 增长计算:`);
-      this.logger.log(`  Token0 增长: ${feeGrowthDelta0.toString()}`);
-      this.logger.log(`  Token1 增长: ${feeGrowthDelta1.toString()}`);
+        if (startFeeGrowth.success && endFeeGrowth.success) {
+          const feeGrowthDelta0 = ethers.BigNumber.from(endFeeGrowth.feeGrowthGlobal0X128)
+            .sub(ethers.BigNumber.from(startFeeGrowth.feeGrowthGlobal0X128));
+          const feeGrowthDelta1 = ethers.BigNumber.from(endFeeGrowth.feeGrowthGlobal1X128)
+            .sub(ethers.BigNumber.from(startFeeGrowth.feeGrowthGlobal1X128));
 
-      // 🔥 检查是否有活动（取绝对值判断）
-      const hasActivity = !feeGrowthDelta0.isZero() || !feeGrowthDelta1.isZero();
+          averageLiquidity = await this.calculateAverageLiquidity(pool.poolId, startBlock, endBlock, stateViewContract);
+          const Q128 = ethers.BigNumber.from(2).pow(128);
+          verificationFeeToken0 = feeGrowthDelta0.abs().mul(averageLiquidity).div(Q128);
+          verificationFeeToken1 = feeGrowthDelta1.abs().mul(averageLiquidity).div(Q128);
 
-      if (hasActivity) {
-        this.logger.log(`✅ 检测到费用增长变化，说明有交易活动`);
-      } else {
-        this.logger.log(`ℹ️  费用增长无变化，该时间段内无交易活动`);
+          this.logger.log(`FeeGrowth 验证数据:`);
+          this.logger.log(`  验证手续费 Token0: ${verificationFeeToken0.toString()}`);
+          this.logger.log(`  验证手续费 Token1: ${verificationFeeToken1.toString()}`);
+        } else {
+          this.logger.warn(`⚠️  FeeGrowth 数据获取失败，跳过验证`);
+        }
+      } catch (error) {
+        this.logger.warn(`⚠️  FeeGrowth 验证失败，继续使用事件数据: ${error.message}`);
       }
 
-      // 🔥 步骤2: 获取平均流动性
-      const averageLiquidity = await this.calculateAverageLiquidity(pool.poolId, startBlock, endBlock, stateViewContract);
-      this.logger.log(`平均流动性: ${averageLiquidity.toString()}`);
+      // 🔥 步骤3: 获取当前流动性（用于显示）
+      try {
+        const currentLiquidity = await stateViewContract.getLiquidity(pool.poolId);
+        averageLiquidity = currentLiquidity;
+        this.logger.log(`当前流动性: ${averageLiquidity.toString()}`);
+      } catch (error) {
+        this.logger.warn(`获取流动性失败: ${error.message}`);
+      }
 
-      // 🔥 步骤3: 计算总手续费收入（使用绝对值，避免负数问题）
-      const Q128 = ethers.BigNumber.from(2).pow(128);
-      const totalFeeToken0 = feeGrowthDelta0.abs().mul(averageLiquidity).div(Q128);
-      const totalFeeToken1 = feeGrowthDelta1.abs().mul(averageLiquidity).div(Q128);
-
-      this.logger.log(`计算得到的总手续费:`);
-      this.logger.log(`  Token0: ${totalFeeToken0.toString()}`);
-      this.logger.log(`  Token1: ${totalFeeToken1.toString()}`);
-
-      // 🔥 步骤4: 获取交易量数据（从事件获取）
-      const volumeData = await this.calculateVolumeFromEvents(pool.poolId, startBlock, endBlock, pool.chainId);
-
-      // 🔥 步骤5: 计算 USD 价值
-      const currentSlot0 = await stateViewContract.getSlot0(pool.poolId);
-      const currentTick = parseInt(currentSlot0.tick.toString());
+      // 🔥 步骤4: 计算 USD 价值
+      let currentTick = 0;
+      try {
+        const currentSlot0 = await stateViewContract.getSlot0(pool.poolId);
+        currentTick = parseInt(currentSlot0.tick.toString());
+      } catch (error) {
+        this.logger.warn(`获取当前价格失败，使用默认值: ${error.message}`);
+      }
 
       const feeRevenueUsd = await this.calculateUsdtValue(
         pool,
-        totalFeeToken0.toString(),
-        totalFeeToken1.toString(),
+        eventData.feeRevenueToken0.toString(),
+        eventData.feeRevenueToken1.toString(),
         currentTick
       );
 
       const volumeUsd = await this.calculateUsdtValue(
         pool,
-        volumeData.volumeToken0.toString(),
-        volumeData.volumeToken1.toString(),
+        eventData.volumeToken0.toString(),
+        eventData.volumeToken1.toString(),
         currentTick
       );
 
-      // 🔥 步骤6: 交叉验证（可选）
-      if (!feeGrowthDelta0.isZero() || !feeGrowthDelta1.isZero()) {
-        this.logger.log(`✅ 检测到交易活动`);
+      // 🔥 步骤5: 验证数据合理性
+      if (eventData.eventCount > 0) {
+        this.logger.log(`✅ 检测到 ${eventData.eventCount} 笔交易`);
 
-        // 简单验证：如果有手续费但没有交易量，可能有问题
-        if ((totalFeeToken0.gt(0) || totalFeeToken1.gt(0)) &&
-          (volumeData.volumeToken0.isZero() && volumeData.volumeToken1.isZero())) {
-          this.logger.warn(`⚠️  有手续费但无交易量，可能事件查询有问题`);
+        if (verificationFeeToken0.gt(0) || verificationFeeToken1.gt(0)) {
+          // 如果两种方法都有数据，进行对比
+          const diff0 = eventData.feeRevenueToken0.sub(verificationFeeToken0).abs();
+          const diff1 = eventData.feeRevenueToken1.sub(verificationFeeToken1).abs();
+
+          if (diff0.gt(eventData.feeRevenueToken0.div(10)) || diff1.gt(eventData.feeRevenueToken1.div(10))) {
+            this.logger.warn(`⚠️  事件计算和 FeeGrowth 验证差异较大，以事件数据为准`);
+          } else {
+            this.logger.log(`✅ 事件数据与 FeeGrowth 验证数据一致`);
+          }
         }
       } else {
-        this.logger.log(`ℹ️  费用增长无变化，确认该时间段内无交易活动`);
+        this.logger.log(`ℹ️  该时间段内无交易活动`);
       }
 
       return {
-        // 🎯 使用 FeeGrowth 的精确手续费
-        feeRevenueToken0: totalFeeToken0.toString(),
-        feeRevenueToken1: totalFeeToken1.toString(),
-        feeRevenueToken0Formatted: uniswapV4Utils.formatTokenAmount(totalFeeToken0, pool.token0Decimals),
-        feeRevenueToken1Formatted: uniswapV4Utils.formatTokenAmount(totalFeeToken1, pool.token1Decimals),
+        // 🎯 优先使用事件计算的精确手续费
+        feeRevenueToken0: eventData.feeRevenueToken0.toString(),
+        feeRevenueToken1: eventData.feeRevenueToken1.toString(),
+        feeRevenueToken0Formatted: uniswapV4Utils.formatTokenAmount(eventData.feeRevenueToken0, pool.token0Decimals),
+        feeRevenueToken1Formatted: uniswapV4Utils.formatTokenAmount(eventData.feeRevenueToken1, pool.token1Decimals),
 
         // 交易量信息
-        volumeToken0: volumeData.volumeToken0.toString(),
-        volumeToken1: volumeData.volumeToken1.toString(),
-        volumeToken0Formatted: uniswapV4Utils.formatTokenAmount(volumeData.volumeToken0, pool.token0Decimals),
-        volumeToken1Formatted: uniswapV4Utils.formatTokenAmount(volumeData.volumeToken1, pool.token1Decimals),
+        volumeToken0: eventData.volumeToken0.toString(),
+        volumeToken1: eventData.volumeToken1.toString(),
+        volumeToken0Formatted: uniswapV4Utils.formatTokenAmount(eventData.volumeToken0, pool.token0Decimals),
+        volumeToken1Formatted: uniswapV4Utils.formatTokenAmount(eventData.volumeToken1, pool.token1Decimals),
 
         // 流动性和USD价值
         liquidityChange: "0",
@@ -536,7 +559,7 @@ export class PoolV4RevenueCollectorService {
   }
 
   /**
-   * 🔥 新增: 获取指定区块的费用增长数据
+   * 🔥 新增: 获取指定区块的费用增长数据（用于验证，可能不支持历史查询）
    */
   private async getFeeGrowthAtBlock(poolId: string, blockNumber: number, stateViewContract: ethers.Contract) {
     try {
@@ -547,15 +570,18 @@ export class PoolV4RevenueCollectorService {
       return {
         feeGrowthGlobal0X128: feeGrowth.feeGrowthGlobal0X128.toString(),
         feeGrowthGlobal1X128: feeGrowth.feeGrowthGlobal1X128.toString(),
-        blockNumber
+        blockNumber,
+        success: true
       };
     } catch (error) {
+      // StateView 合约可能不支持历史区块查询
       this.logger.warn(`获取区块 ${blockNumber} 的费用增长数据失败: ${error.message}`);
-      // 返回0值，表示无法获取数据
       return {
         feeGrowthGlobal0X128: "0",
         feeGrowthGlobal1X128: "0",
-        blockNumber
+        blockNumber,
+        success: false,
+        error: error.message
       };
     }
   }
@@ -594,7 +620,136 @@ export class PoolV4RevenueCollectorService {
   }
 
   /**
-   * 🔥 增强：从事件中计算交易量
+   * 🔥 修复：从 Swap 事件中直接计算手续费和交易量（V4 最可靠的方法）
+   * 优先使用池子的固定 feeTier，如果事件中的 fee 不一致会记录警告
+   */
+  private async calculateRevenueFromEvents(
+    poolId: string,
+    startBlock: number,
+    endBlock: number,
+    chainId: number,
+    token0Decimals: number,
+    token1Decimals: number,
+    poolFeeTier: number  // 🔥 池子的固定手续费
+  ) {
+    let feeRevenueToken0 = ethers.BigNumber.from(0);
+    let feeRevenueToken1 = ethers.BigNumber.from(0);
+    let volumeToken0 = ethers.BigNumber.from(0);
+    let volumeToken1 = ethers.BigNumber.from(0);
+
+    try {
+      // 获取 Swap 事件
+      const swapEvents = await this.getV4SwapEvents(poolId, startBlock, endBlock, chainId);
+      this.logger.log(`找到 ${swapEvents.length} 个 Swap 事件用于计算`);
+
+      const FEE_DENOMINATOR = 1000000; // V4 手续费分母
+
+      // 🔥 优先使用池子的固定手续费
+      const poolFeeBN = ethers.BigNumber.from(poolFeeTier);
+      this.logger.log(`使用池子固定手续费: ${poolFeeTier} (费率: ${(poolFeeTier / 10000).toFixed(4)}%)`);
+
+      for (const event of swapEvents) {
+        const { amount0, amount1, fee, sender } = event.args;
+
+        // 🔥 验证事件中的 fee 是否与池子一致
+        let eventFeeBN: ethers.BigNumber;
+        try {
+          eventFeeBN = ethers.BigNumber.from(fee);
+
+          // 如果事件中的 fee 与池子的 feeTier 不一致，记录警告（但使用池子的固定值）
+          if (!eventFeeBN.eq(poolFeeBN)) {
+            this.logger.warn(`⚠️  事件中的手续费 (${eventFeeBN.toString()}) 与池子固定手续费 (${poolFeeTier}) 不一致，使用池子固定值`);
+          }
+        } catch (error) {
+          this.logger.warn(`事件中的 Fee 格式错误: ${fee}, 使用池子固定值 ${poolFeeTier}`);
+        }
+
+        // 🔥 使用池子的固定手续费进行计算（更可靠）
+        const feeBN = poolFeeBN;
+
+        // 🔥 V4 的 amount 是 int128，正确解析有符号数
+        let signedAmount0: ethers.BigNumber;
+        let signedAmount1: ethers.BigNumber;
+
+        try {
+          // int128 是有符号数，需要转换
+          signedAmount0 = amount0.fromTwos ? amount0.fromTwos(128) : amount0;
+          signedAmount1 = amount1.fromTwos ? amount1.fromTwos(128) : amount1;
+        } catch (error) {
+          // 如果 fromTwos 失败，直接使用原值
+          signedAmount0 = amount0;
+          signedAmount1 = amount1;
+        }
+
+        // 🔥 手续费计算：amount > 0 表示输入，从输入中扣除手续费
+        // V4 的手续费公式：手续费 = 输入金额 * fee / 1000000
+        if (signedAmount0.gt(0)) {
+          // token0 是输入
+          const inputAmount0 = signedAmount0;
+          const fee0 = inputAmount0.mul(feeBN).div(FEE_DENOMINATOR);
+          feeRevenueToken0 = feeRevenueToken0.add(fee0);
+          volumeToken0 = volumeToken0.add(inputAmount0);
+        } else if (signedAmount1.gt(0)) {
+          // token1 是输入
+          const inputAmount1 = signedAmount1;
+          const fee1 = inputAmount1.mul(feeBN).div(FEE_DENOMINATOR);
+          feeRevenueToken1 = feeRevenueToken1.add(fee1);
+          volumeToken1 = volumeToken1.add(inputAmount1);
+        }
+
+        // 详细日志（只记录前几个）
+        if (swapEvents.indexOf(event) < 3) {
+          this.logger.log(`  事件 ${event.blockNumber}:`);
+          this.logger.log(`    Amount0: ${signedAmount0.toString()}, Amount1: ${signedAmount1.toString()}`);
+
+          // 🔥 修复：安全地获取 fee 的数值
+          try {
+            const feeValue = feeBN.toNumber();
+            const feeRate = (feeValue / 10000).toFixed(4);
+            this.logger.log(`    Fee: ${feeValue}, FeeRate: ${feeRate}%`);
+          } catch (error) {
+            this.logger.log(`    Fee: ${feeBN.toString()}`);
+          }
+
+          if (signedAmount0.gt(0)) {
+            const calculatedFee = signedAmount0.mul(feeBN).div(FEE_DENOMINATOR);
+            this.logger.log(`    手续费 Token0: ${calculatedFee.toString()}`);
+          }
+          if (signedAmount1.gt(0)) {
+            const calculatedFee = signedAmount1.mul(feeBN).div(FEE_DENOMINATOR);
+            this.logger.log(`    手续费 Token1: ${calculatedFee.toString()}`);
+          }
+        }
+      }
+
+      this.logger.log(`从事件计算完成:`);
+      this.logger.log(`  手续费 Token0: ${feeRevenueToken0.toString()}`);
+      this.logger.log(`  手续费 Token1: ${feeRevenueToken1.toString()}`);
+      this.logger.log(`  交易量 Token0: ${volumeToken0.toString()}`);
+      this.logger.log(`  交易量 Token1: ${volumeToken1.toString()}`);
+
+      return {
+        feeRevenueToken0,
+        feeRevenueToken1,
+        volumeToken0,
+        volumeToken1,
+        eventCount: swapEvents.length
+      };
+
+    } catch (error) {
+      this.logger.error(`从事件计算手续费和交易量失败: ${error.message}`);
+      return {
+        feeRevenueToken0: ethers.BigNumber.from(0),
+        feeRevenueToken1: ethers.BigNumber.from(0),
+        volumeToken0: ethers.BigNumber.from(0),
+        volumeToken1: ethers.BigNumber.from(0),
+        eventCount: 0
+      };
+    }
+  }
+
+  /**
+   * 🔥 增强：从事件中计算交易量（保留用于兼容性）
    */
   private async calculateVolumeFromEvents(
     poolId: string,
